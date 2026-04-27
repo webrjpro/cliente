@@ -68,19 +68,48 @@ async function handleLogout() {
 
 async function loadClienteData() {
   if (!currentUser) return;
-  const { data, error } = await supabase
+
+  // 1) Tenta achar o registro já vinculado via portal_user_id.
+  //    Usar maybeSingle() em vez de single() pra evitar 406 quando 0 linhas.
+  let { data, error } = await supabase
     .from('clientes')
     .select('*')
     .eq('portal_user_id', currentUser.id)
-    .single();
+    .maybeSingle();
 
-  if (data) {
-    clienteData = data;
-    // Update last login
+  // 2) Se não está vinculado ainda, chama RPC link_portal_account().
+  //    A função faz match por email + grava portal_user_id de forma atômica.
+  if (!data) {
+    const linkRes = await supabase.rpc('link_portal_account');
+    if (linkRes && linkRes.data) {
+      data = linkRes.data;
+    } else if (linkRes && linkRes.error) {
+      console.warn('[auth] link_portal_account RPC erro:', linkRes.error.message || linkRes.error);
+    }
+  }
+
+  // 3) Ainda assim sem cliente? Mostra mensagem amigável e encerra sessão.
+  if (!data) {
+    showLogin();
+    const msgEl = document.getElementById('login-error');
+    if (msgEl) {
+      msgEl.textContent = 'Sua conta de login existe mas ainda não está vinculada a um cliente cadastrado. Procure o gestor e verifique se o e-mail cadastrado é exatamente o mesmo do login.';
+      msgEl.style.display = 'block';
+    }
+    try { await supabase.auth.signOut(); } catch (_) { }
+    currentUser = null;
+    clienteData = null;
+    return;
+  }
+
+  clienteData = data;
+
+  // Atualiza última atividade do portal (best-effort, não bloqueia UI)
+  try {
     await supabase.from('clientes')
       .update({ portal_ultimo_login: new Date().toISOString() })
       .eq('id', data.id);
-  }
+  } catch (_) { /* ignora — RLS de UPDATE pode não permitir mais alterações depois do link */ }
 }
 
 function showLogin() {
