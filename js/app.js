@@ -6,7 +6,33 @@ let currentPage = 'dashboard';
 let realtimeChannel = null;
 
 // ── Navigation ──
-function navigate(page) {
+const PAGE_RENDERERS = {
+  dashboard: () => renderDashboard,
+  margens: () => renderMargens,
+  solicitar: () => renderSolicitar,
+  pedidos: () => renderPedidos,
+  contratos: () => renderContratos,
+  notificacoes: () => renderNotificacoes,
+};
+
+function renderNavError(container, page, err) {
+  console.error(`[portal] Erro ao renderizar página "${page}":`, err);
+  const msg = (err && err.message) ? err.message : 'Erro desconhecido';
+  container.innerHTML = `
+    <div class="empty-state" style="padding:40px 20px">
+      <div class="icon">⚠️</div>
+      <h3>Não foi possível carregar esta página</h3>
+      <p style="margin-bottom:16px">${escapeHtml(msg)}</p>
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+        <button class="btn-brand" onclick="navigate('${page}')">Tentar novamente</button>
+        <button class="btn-ghost" onclick="navigate('dashboard')">Voltar ao Dashboard</button>
+      </div>
+      <p style="font-size:0.72rem;color:var(--text-muted);margin-top:16px">Detalhes técnicos no console (F12)</p>
+    </div>
+  `;
+}
+
+async function navigate(page) {
   currentPage = page;
   document.querySelectorAll('.nav-item').forEach(n => {
     n.classList.toggle('active', n.dataset.page === page);
@@ -15,14 +41,12 @@ function navigate(page) {
   main.innerHTML = '<div class="page-loader"><div class="spinner"></div></div>';
   closeSidebar();
 
-  switch(page) {
-    case 'dashboard': renderDashboard(main); break;
-    case 'margens': renderMargens(main); break;
-    case 'solicitar': renderSolicitar(main); break;
-    case 'pedidos': renderPedidos(main); break;
-    case 'contratos': renderContratos(main); break;
-    case 'notificacoes': renderNotificacoes(main); break;
-    default: renderDashboard(main);
+  const rendererFactory = PAGE_RENDERERS[page] || PAGE_RENDERERS.dashboard;
+  const renderer = rendererFactory();
+  try {
+    await renderer(main);
+  } catch (err) {
+    renderNavError(main, page, err);
   }
 }
 
@@ -209,15 +233,31 @@ async function renderMargens(container) {
     `;
   }
 
+  // Label inteligente para tipos extras: 1-4 chars vira UPPERCASE (PIS, INSS, FGTS),
+  // demais viram Title Case ("consignado" → "Consignado").
+  function smartLabel(key) {
+    const s = String(key || 'Tipo').trim();
+    if (!s) return 'Tipo';
+    if (s.length <= 4) return s.toUpperCase();
+    return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  }
+
+  // Renderiza TODOS os tipos extras configurados pelo gestor (defensivo:
+  // ignora keys reservadas avulso/parcelado/cartao caso venham misturadas;
+  // ordena alfabeticamente para consistência visual entre logins).
   let extrasHTML = '';
-  Object.keys(limitesTipos).forEach(tipo => {
-    const val = Number(limitesTipos[tipo]) || 0;
-    if (val > 0) {
-      const usado = ativos.filter(e => e.tipo === tipo).reduce((s, e) => s + Number(e.valor), 0);
-      const label = String(tipo || 'Tipo');
-      extrasHTML += barHTML(label.charAt(0).toUpperCase() + label.slice(1), val, usado);
-    }
-  });
+  const RESERVED = new Set(['avulso', 'parcelado', 'cartao']);
+  Object.keys(limitesTipos)
+    .filter(k => !RESERVED.has(String(k).toLowerCase()))
+    .sort()
+    .forEach(tipo => {
+      const val = Number(limitesTipos[tipo]) || 0;
+      if (val > 0) {
+        const usado = ativos.filter(e => String(e.tipo).toLowerCase() === String(tipo).toLowerCase())
+          .reduce((s, e) => s + Number(e.valor), 0);
+        extrasHTML += barHTML(smartLabel(tipo), val, usado);
+      }
+    });
 
   container.innerHTML = `
     <div class="fade-in">
@@ -225,9 +265,9 @@ async function renderMargens(container) {
         <h1>📈 Minhas Margens</h1>
         <p>Acompanhe seus limites de crédito em tempo real</p>
       </div>
-      ${barHTML('Limite Geral', limite, usadoTotal)}
-      ${barHTML('Limite Parcelado', limParcelado, usadoParcelado)}
-      ${barHTML('Limite Cartão', limCartao, usadoCartao)}
+      ${barHTML('Limite Total', limite, usadoTotal)}
+      ${barHTML('Parcelado', limParcelado, usadoParcelado)}
+      ${barHTML('Cartão', limCartao, usadoCartao)}
       ${extrasHTML}
       <p style="font-size:0.78rem;color:var(--text-muted);margin-top:16px;text-align:center">
         💡 Os limites são definidos e atualizados pelo seu gestor
