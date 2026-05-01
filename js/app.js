@@ -90,6 +90,58 @@ function isPortalVisibleEmprestimo(emprestimo) {
   return aprovacao === 'aprovado' || aprovacao === 'arquivado';
 }
 
+// Label inteligente para tipos: 1-4 chars vira UPPERCASE (PIS, INSS, FGTS),
+// demais viram Title Case ("consignado" → "Consignado").
+function smartLabel(key) {
+  const s = String(key || 'Tipo').trim();
+  if (!s) return 'Tipo';
+  if (s.length <= 4) return s.toUpperCase();
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
+// Retorna todos os tipos de crédito do cliente com seus limites, uso e disponível.
+// Inclui os 3 fixos (avulso/parcelado/cartao) + extras de limites_tipos (PIS, INSS, etc).
+// `ativos` = lista de empréstimos ativos visíveis.
+function getTiposComLimites(cliData, ativos) {
+  const limiteBase = Number(cliData.limite) || 0;
+  const limPar = cliData.limite_parcelado != null ? Number(cliData.limite_parcelado) : limiteBase;
+  const limCar = cliData.limite_cartao != null ? Number(cliData.limite_cartao) : limiteBase;
+  const limitesTipos = parseJsonObject(cliData.limites_tipos);
+
+  const tipos = [
+    { key: 'avulso', label: 'Avulso', limite: limiteBase },
+    { key: 'parcelado', label: 'Parcelado', limite: limPar },
+    { key: 'cartao', label: 'Cartão', limite: limCar },
+  ];
+  const RESERVED = new Set(['avulso', 'parcelado', 'cartao']);
+  Object.keys(limitesTipos)
+    .filter(k => !RESERVED.has(String(k).toLowerCase()))
+    .sort()
+    .forEach(k => {
+      const v = Number(limitesTipos[k]) || 0;
+      if (v > 0) tipos.push({ key: String(k).toLowerCase(), label: smartLabel(k), limite: v });
+    });
+
+  // Calcula uso por tipo (case-insensitive)
+  tipos.forEach(t => {
+    t.usado = (ativos || [])
+      .filter(e => String(e.tipo || '').toLowerCase() === t.key)
+      .reduce((s, e) => s + (Number(e.valor) || 0), 0);
+    t.disponivel = Math.max(0, t.limite - t.usado);
+  });
+
+  return tipos;
+}
+
+// Wrapper com timeout para queries do supabase. Se passar de N segundos sem
+// resposta, rejeita a Promise — evita spinner travado para sempre.
+function withTimeout(promise, ms = 10000, label = 'query') {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`Tempo esgotado em "${label}". Verifique sua conexão.`)), ms))
+  ]);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════
@@ -99,21 +151,23 @@ async function renderDashboard(container) {
     return;
   }
 
-  // Fetch data in parallel
-  const [empRes, solRes, notifRes] = await Promise.all([
+  // Fetch data in parallel (com timeout — evita spinner eterno se rede falhar)
+  const [empRes, solRes, notifRes] = await withTimeout(Promise.all([
     supabase.from('emprestimos').select('*').eq('cliente_id', clienteData.id).order('created_at', { ascending: false }),
     supabase.from('solicitacoes_emprestimo').select('*').eq('cliente_id', clienteData.id).order('created_at', { ascending: false }).limit(5),
     supabase.from('notificacoes_cliente').select('*').eq('cliente_id', clienteData.id).eq('lida', false)
-  ]);
+  ]), 10000, 'dashboard');
 
   const emprestimos = empRes.data || [];
   const solicitacoes = solRes.data || [];
   const notifCount = (notifRes.data || []).length;
 
   const ativos = emprestimos.filter(e => e.status === 'ativo' && isPortalVisibleEmprestimo(e));
-  const totalDevido = ativos.reduce((s, e) => s + (Number(e.valor) || 0), 0);
-  const limite = Number(clienteData.limite) || 0;
-  const usado = totalDevido;
+  // Limite TOTAL = soma de TODOS os tipos (avulso + parcelado + cartao + extras)
+  // — alinhado com o gestor: "Uso total (N tipos): X / Y"
+  const tiposLimites = getTiposComLimites(clienteData, ativos);
+  const limite = tiposLimites.reduce((s, t) => s + t.limite, 0);
+  const usado = tiposLimites.reduce((s, t) => s + t.usado, 0);
   const disponivel = Math.max(0, limite - usado);
   const pendentes = solicitacoes.filter(s => s.status === 'pendente' || s.status === 'em_analise').length;
 
@@ -200,17 +254,14 @@ async function renderDashboard(container) {
 async function renderMargens(container) {
   if (!clienteData) { container.innerHTML = noDataMsg(); return; }
 
-  const { data: emprestimos } = await supabase.from('emprestimos').select('valor,tipo,status,aprovacao').eq('cliente_id', clienteData.id).eq('status', 'ativo');
+  const { data: emprestimos } = await withTimeout(
+    supabase.from('emprestimos').select('valor,tipo,status,aprovacao').eq('cliente_id', clienteData.id).eq('status', 'ativo'),
+    10000, 'margens'
+  );
   const ativos = (emprestimos || []).filter(isPortalVisibleEmprestimo);
-
-  const limite = Number(clienteData.limite) || 0;
-  const limParcelado = clienteData.limite_parcelado != null ? Number(clienteData.limite_parcelado) : limite;
-  const limCartao = clienteData.limite_cartao != null ? Number(clienteData.limite_cartao) : limite;
-  const limitesTipos = parseJsonObject(clienteData.limites_tipos);
-
-  const usadoTotal = ativos.reduce((s, e) => s + Number(e.valor), 0);
-  const usadoParcelado = ativos.filter(e => e.tipo === 'parcelado').reduce((s, e) => s + Number(e.valor), 0);
-  const usadoCartao = ativos.filter(e => e.tipo === 'cartao').reduce((s, e) => s + Number(e.valor), 0);
+  const tipos = getTiposComLimites(clienteData, ativos);
+  const totalLimite = tipos.reduce((s, t) => s + t.limite, 0);
+  const totalUsado = tipos.reduce((s, t) => s + t.usado, 0);
 
   function barHTML(label, total, used) {
     const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
@@ -233,31 +284,7 @@ async function renderMargens(container) {
     `;
   }
 
-  // Label inteligente para tipos extras: 1-4 chars vira UPPERCASE (PIS, INSS, FGTS),
-  // demais viram Title Case ("consignado" → "Consignado").
-  function smartLabel(key) {
-    const s = String(key || 'Tipo').trim();
-    if (!s) return 'Tipo';
-    if (s.length <= 4) return s.toUpperCase();
-    return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
-  }
-
-  // Renderiza TODOS os tipos extras configurados pelo gestor (defensivo:
-  // ignora keys reservadas avulso/parcelado/cartao caso venham misturadas;
-  // ordena alfabeticamente para consistência visual entre logins).
-  let extrasHTML = '';
-  const RESERVED = new Set(['avulso', 'parcelado', 'cartao']);
-  Object.keys(limitesTipos)
-    .filter(k => !RESERVED.has(String(k).toLowerCase()))
-    .sort()
-    .forEach(tipo => {
-      const val = Number(limitesTipos[tipo]) || 0;
-      if (val > 0) {
-        const usado = ativos.filter(e => String(e.tipo).toLowerCase() === String(tipo).toLowerCase())
-          .reduce((s, e) => s + Number(e.valor), 0);
-        extrasHTML += barHTML(smartLabel(tipo), val, usado);
-      }
-    });
+  const tiposHTML = tipos.filter(t => t.limite > 0).map(t => barHTML(t.label, t.limite, t.usado)).join('');
 
   container.innerHTML = `
     <div class="fade-in">
@@ -265,10 +292,8 @@ async function renderMargens(container) {
         <h1>📈 Minhas Margens</h1>
         <p>Acompanhe seus limites de crédito em tempo real</p>
       </div>
-      ${barHTML('Limite Total', limite, usadoTotal)}
-      ${barHTML('Parcelado', limParcelado, usadoParcelado)}
-      ${barHTML('Cartão', limCartao, usadoCartao)}
-      ${extrasHTML}
+      ${barHTML('Limite Total Geral', totalLimite, totalUsado)}
+      ${tiposHTML}
       <p style="font-size:0.78rem;color:var(--text-muted);margin-top:16px;text-align:center">
         💡 Os limites são definidos e atualizados pelo seu gestor
       </p>
@@ -282,34 +307,50 @@ async function renderMargens(container) {
 async function renderSolicitar(container) {
   if (!clienteData) { container.innerHTML = noDataMsg(); return; }
 
-  const limite = Number(clienteData.limite) || 0;
-  const { data: ativos } = await supabase.from('emprestimos').select('valor').eq('cliente_id', clienteData.id).eq('status', 'ativo');
-  const usado = (ativos || []).reduce((s, e) => s + Number(e.valor), 0);
-  const disponivel = Math.max(0, limite - usado);
+  const { data: ativos } = await withTimeout(
+    supabase.from('emprestimos').select('valor,tipo,aprovacao').eq('cliente_id', clienteData.id).eq('status', 'ativo'),
+    10000, 'solicitar'
+  );
+  const ativosFiltered = (ativos || []).filter(isPortalVisibleEmprestimo);
+  const tipos = getTiposComLimites(clienteData, ativosFiltered).filter(t => t.limite > 0);
+
+  // Stash em window pra o onchange do <select> ler sem refetch
+  window.__solTiposCache = tipos;
+
+  // Tabela resumo dos limites por tipo (cliente vê tudo de uma vez)
+  const tiposTableHTML = tipos.map(t => {
+    const pct = t.limite > 0 ? Math.min(100, Math.round((t.usado / t.limite) * 100)) : 0;
+    const cor = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#10b981';
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border-glass);font-size:0.85rem">
+        <span style="font-weight:600">${escapeHtml(t.label)}</span>
+        <span style="color:var(--text-muted);font-size:0.78rem">Usado ${formatMoney(t.usado)}</span>
+        <span style="color:${cor};font-weight:700">${formatMoney(t.disponivel)}</span>
+      </div>
+    `;
+  }).join('');
+
+  // O 1º tipo com disponibilidade > 0 vira default selecionado
+  const tipoDefault = tipos.find(t => t.disponivel > 0) || tipos[0] || { key: 'avulso', label: 'Avulso', disponivel: 0 };
 
   container.innerHTML = `
     <div class="fade-in">
       <div class="page-header">
         <h1>💰 Solicitar Crédito</h1>
-        <p>Preencha os dados abaixo para solicitar um novo empréstimo</p>
+        <p>Escolha o tipo de crédito e o valor desejado</p>
       </div>
-      <div class="glass-card" style="max-width:560px">
-        <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);border-radius:12px;padding:16px;margin-bottom:24px">
-          <div style="font-size:0.75rem;font-weight:700;color:var(--brand-emerald);text-transform:uppercase;margin-bottom:4px">Margem disponível</div>
-          <div style="font-size:1.5rem;font-weight:900;color:var(--brand-emerald)" class="text-money">${formatMoney(disponivel)}</div>
+      <div class="glass-card" style="max-width:640px">
+        <div style="background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:12px;padding:12px 0;margin-bottom:20px">
+          <div style="padding:0 14px 8px;font-size:0.72rem;font-weight:700;color:var(--brand-emerald);text-transform:uppercase">Seus limites disponíveis</div>
+          ${tiposTableHTML || '<div style="padding:14px;text-align:center;color:var(--text-muted)">Nenhum limite definido</div>'}
         </div>
+
         <form id="form-solicitar-inline" onsubmit="submitSolicitacao(event)">
-          <div style="margin-bottom:16px">
-            <label class="input-label">Valor desejado (R$)</label>
-            <input type="number" id="sol-valor-i" class="input-field" placeholder="1000.00" min="1" max="${disponivel > 0 ? disponivel : 999999}" step="0.01" required>
-          </div>
           <div class="grid-2" style="margin-bottom:16px">
             <div>
-              <label class="input-label">Tipo</label>
-              <select id="sol-tipo-i" class="input-field">
-                <option value="avulso">Avulso</option>
-                <option value="parcelado">Parcelado</option>
-                <option value="cartao">Cartão</option>
+              <label class="input-label">Tipo de crédito</label>
+              <select id="sol-tipo-i" class="input-field" onchange="atualizarMargemSolicitar()">
+                ${tipos.map(t => `<option value="${escapeHtml(t.key)}" ${t.key === tipoDefault.key ? 'selected' : ''}>${escapeHtml(t.label)} — ${formatMoney(t.disponivel)} disponível</option>`).join('')}
               </select>
             </div>
             <div>
@@ -319,17 +360,42 @@ async function renderSolicitar(container) {
               </select>
             </div>
           </div>
+
+          <div style="margin-bottom:16px">
+            <label class="input-label">Valor desejado (R$) <span id="sol-margem-hint" style="font-weight:400;font-size:0.78rem;color:var(--brand-emerald)">— máx ${formatMoney(tipoDefault.disponivel)}</span></label>
+            <input type="number" id="sol-valor-i" class="input-field" placeholder="0,00" min="1" max="${tipoDefault.disponivel || 999999}" step="0.01" required>
+          </div>
+
           <div style="margin-bottom:24px">
             <label class="input-label">Observação (opcional)</label>
             <textarea id="sol-obs-i" class="input-field" rows="3" placeholder="Motivo ou observação..."></textarea>
           </div>
-          <button type="submit" class="btn-brand" style="width:100%;padding:14px" id="btn-submit-sol-i">
-            Enviar Solicitação
+          <button type="submit" class="btn-brand" style="width:100%;padding:14px" id="btn-submit-sol-i" ${tipoDefault.disponivel <= 0 ? 'disabled' : ''}>
+            ${tipoDefault.disponivel <= 0 ? 'Sem limite disponível' : 'Enviar Solicitação'}
           </button>
         </form>
       </div>
     </div>
   `;
+}
+
+// Chamada no onchange do <select> de tipo — atualiza max do input + hint
+function atualizarMargemSolicitar() {
+  const tipos = window.__solTiposCache || [];
+  const sel = document.getElementById('sol-tipo-i');
+  const inp = document.getElementById('sol-valor-i');
+  const hint = document.getElementById('sol-margem-hint');
+  const btn = document.getElementById('btn-submit-sol-i');
+  if (!sel || !inp) return;
+  const t = tipos.find(x => x.key === sel.value);
+  if (!t) return;
+  inp.max = t.disponivel || 999999;
+  if (Number(inp.value) > t.disponivel) inp.value = '';
+  if (hint) hint.textContent = `— máx ${formatMoney(t.disponivel)}`;
+  if (btn) {
+    btn.disabled = t.disponivel <= 0;
+    btn.textContent = t.disponivel <= 0 ? 'Sem limite disponível' : 'Enviar Solicitação';
+  }
 }
 
 async function submitSolicitacao(e) {
@@ -377,11 +443,10 @@ async function submitSolicitacao(e) {
 async function renderPedidos(container) {
   if (!clienteData) { container.innerHTML = noDataMsg(); return; }
 
-  const { data: solicitacoes } = await supabase
-    .from('solicitacoes_emprestimo')
-    .select('*')
-    .eq('cliente_id', clienteData.id)
-    .order('created_at', { ascending: false });
+  const { data: solicitacoes } = await withTimeout(
+    supabase.from('solicitacoes_emprestimo').select('*').eq('cliente_id', clienteData.id).order('created_at', { ascending: false }),
+    10000, 'pedidos'
+  );
 
   const items = solicitacoes || [];
 
@@ -431,11 +496,10 @@ async function cancelarSolicitacao(id) {
 async function renderContratos(container) {
   if (!clienteData) { container.innerHTML = noDataMsg(); return; }
 
-  const { data: emprestimos } = await supabase
-    .from('emprestimos')
-    .select('*')
-    .eq('cliente_id', clienteData.id)
-    .order('created_at', { ascending: false });
+  const { data: emprestimos } = await withTimeout(
+    supabase.from('emprestimos').select('*').eq('cliente_id', clienteData.id).order('created_at', { ascending: false }),
+    10000, 'contratos'
+  );
 
   const items = (emprestimos || []).filter(isPortalVisibleEmprestimo);
 
@@ -485,12 +549,10 @@ async function renderContratos(container) {
 async function renderNotificacoes(container) {
   if (!clienteData) { container.innerHTML = noDataMsg(); return; }
 
-  const { data: notifs } = await supabase
-    .from('notificacoes_cliente')
-    .select('*')
-    .eq('cliente_id', clienteData.id)
-    .order('created_at', { ascending: false })
-    .limit(50);
+  const { data: notifs } = await withTimeout(
+    supabase.from('notificacoes_cliente').select('*').eq('cliente_id', clienteData.id).order('created_at', { ascending: false }).limit(50),
+    10000, 'notificacoes'
+  );
 
   const items = notifs || [];
 
