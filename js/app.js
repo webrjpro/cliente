@@ -39,16 +39,32 @@ function closeSidebar() {
 // ── Toast ──
 function showToast(msg, type = 'success') {
   const c = document.getElementById('toast-container');
+  const safeType = type === 'error' ? 'error' : 'success';
   const t = document.createElement('div');
-  t.className = `toast toast-${type}`;
-  t.innerHTML = `<span>${type === 'success' ? '✅' : '❌'}</span> ${msg}`;
+  t.className = `toast toast-${safeType}`;
+  const icon = document.createElement('span');
+  icon.textContent = safeType === 'success' ? '✅' : '❌';
+  t.appendChild(icon);
+  t.appendChild(document.createTextNode(` ${String(msg ?? '')}`));
   c.appendChild(t);
   setTimeout(() => { t.style.opacity='0'; setTimeout(() => t.remove(), 300); }, 4000);
 }
 
+document.addEventListener('click', (event) => {
+  const cancelButton = event.target.closest('[data-cancel-solicitacao]');
+  if (cancelButton) {
+    cancelarSolicitacao(cancelButton.dataset.cancelSolicitacao);
+  }
+});
+
 // ── Modal ──
 function openModal(id) { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+function isPortalVisibleEmprestimo(emprestimo) {
+  const aprovacao = emprestimo?.aprovacao || 'aprovado';
+  return aprovacao === 'aprovado' || aprovacao === 'arquivado';
+}
 
 // ═══════════════════════════════════════════════════════════════
 // DASHBOARD
@@ -70,7 +86,7 @@ async function renderDashboard(container) {
   const solicitacoes = solRes.data || [];
   const notifCount = (notifRes.data || []).length;
 
-  const ativos = emprestimos.filter(e => e.status === 'ativo');
+  const ativos = emprestimos.filter(e => e.status === 'ativo' && isPortalVisibleEmprestimo(e));
   const totalDevido = ativos.reduce((s, e) => s + (Number(e.valor) || 0), 0);
   const limite = Number(clienteData.limite) || 0;
   const usado = totalDevido;
@@ -90,7 +106,7 @@ async function renderDashboard(container) {
   container.innerHTML = `
     <div class="fade-in">
       <div class="page-header">
-        <h1>Olá, ${(clienteData.nome || 'Cliente').split(' ')[0]}! 👋</h1>
+        <h1>Olá, ${escapeHtml((clienteData.nome || 'Cliente').split(' ')[0])}! 👋</h1>
         <p>Acompanhe seus créditos e faça novas solicitações</p>
       </div>
       <div class="stats-grid">
@@ -144,7 +160,7 @@ async function renderDashboard(container) {
                   <div style="font-weight:700;font-size:0.9rem">${formatMoney(s.valor)}</div>
                   <div style="font-size:0.75rem;color:var(--text-muted)">${formatDate(s.created_at)}</div>
                 </div>
-                <span class="badge badge-${s.status}"><span class="badge-dot"></span>${statusLabel(s.status)}</span>
+                <span class="badge badge-${cssToken(s.status)}"><span class="badge-dot"></span>${escapeHtml(statusLabel(s.status))}</span>
               </div>
             `).join('')
           }
@@ -160,13 +176,13 @@ async function renderDashboard(container) {
 async function renderMargens(container) {
   if (!clienteData) { container.innerHTML = noDataMsg(); return; }
 
-  const { data: emprestimos } = await supabase.from('emprestimos').select('valor,tipo,status').eq('cliente_id', clienteData.id).eq('status', 'ativo');
-  const ativos = emprestimos || [];
+  const { data: emprestimos } = await supabase.from('emprestimos').select('valor,tipo,status,aprovacao').eq('cliente_id', clienteData.id).eq('status', 'ativo');
+  const ativos = (emprestimos || []).filter(isPortalVisibleEmprestimo);
 
   const limite = Number(clienteData.limite) || 0;
   const limParcelado = clienteData.limite_parcelado != null ? Number(clienteData.limite_parcelado) : limite;
   const limCartao = clienteData.limite_cartao != null ? Number(clienteData.limite_cartao) : limite;
-  const limitesTipos = typeof clienteData.limites_tipos === 'string' ? JSON.parse(clienteData.limites_tipos || '{}') : (clienteData.limites_tipos || {});
+  const limitesTipos = parseJsonObject(clienteData.limites_tipos);
 
   const usadoTotal = ativos.reduce((s, e) => s + Number(e.valor), 0);
   const usadoParcelado = ativos.filter(e => e.tipo === 'parcelado').reduce((s, e) => s + Number(e.valor), 0);
@@ -178,7 +194,7 @@ async function renderMargens(container) {
     return `
       <div class="glass-card fade-in" style="margin-bottom:12px">
         <div class="flex justify-between items-center" style="margin-bottom:8px">
-          <span style="font-weight:700;font-size:0.9rem">${label}</span>
+          <span style="font-weight:700;font-size:0.9rem">${escapeHtml(label)}</span>
           <span style="font-size:0.8rem;color:var(--text-muted)">${pct}% usado</span>
         </div>
         <div style="height:10px;background:rgba(255,255,255,0.05);border-radius:10px;overflow:hidden;margin-bottom:12px">
@@ -198,7 +214,8 @@ async function renderMargens(container) {
     const val = Number(limitesTipos[tipo]) || 0;
     if (val > 0) {
       const usado = ativos.filter(e => e.tipo === tipo).reduce((s, e) => s + Number(e.valor), 0);
-      extrasHTML += barHTML(tipo.charAt(0).toUpperCase() + tipo.slice(1), val, usado);
+      const label = String(tipo || 'Tipo');
+      extrasHTML += barHTML(label.charAt(0).toUpperCase() + label.slice(1), val, usado);
     }
   });
 
@@ -345,11 +362,11 @@ async function renderPedidos(container) {
               <tr>
                 <td>${formatDate(s.created_at)}</td>
                 <td class="text-money" style="font-weight:700">${formatMoney(s.valor)}</td>
-                <td>${s.tipo || 'avulso'}</td>
-                <td>${s.parcelas}x</td>
-                <td><span class="badge badge-${s.status}"><span class="badge-dot"></span>${statusLabel(s.status)}</span></td>
-                <td style="font-size:0.8rem;color:var(--text-muted)">${s.motivo_decisao || '—'}</td>
-                <td>${s.status === 'pendente' ? `<button class="btn-ghost" style="font-size:0.75rem;padding:4px 12px" onclick="cancelarSolicitacao('${s.id}')">Cancelar</button>` : '—'}</td>
+                <td>${escapeHtml(s.tipo || 'avulso')}</td>
+                <td>${Number(s.parcelas) || 1}x</td>
+                <td><span class="badge badge-${cssToken(s.status)}"><span class="badge-dot"></span>${escapeHtml(statusLabel(s.status))}</span></td>
+                <td style="font-size:0.8rem;color:var(--text-muted)">${escapeHtml(s.motivo_decisao || '—')}</td>
+                <td>${s.status === 'pendente' ? `<button class="btn-ghost" style="font-size:0.75rem;padding:4px 12px" data-cancel-solicitacao="${escapeHtml(s.id)}">Cancelar</button>` : '—'}</td>
               </tr>
             `).join('')}</tbody>
           </table></div>`
@@ -380,7 +397,7 @@ async function renderContratos(container) {
     .eq('cliente_id', clienteData.id)
     .order('created_at', { ascending: false });
 
-  const items = emprestimos || [];
+  const items = (emprestimos || []).filter(isPortalVisibleEmprestimo);
 
   container.innerHTML = `
     <div class="fade-in">
@@ -391,29 +408,29 @@ async function renderContratos(container) {
       ${items.length === 0
         ? '<div class="empty-state"><div class="icon">📑</div><h3>Nenhum contrato</h3><p>Você ainda não possui contratos</p></div>'
         : items.map(e => {
-          const parcPagas = e.parcelas_pagas || 0;
-          const parcTotal = e.parcelas || 1;
-          const pct = Math.round((parcPagas / parcTotal) * 100);
+          const parcPagas = Math.max(0, Number(e.parcelas_pagas) || 0);
+          const parcTotal = Math.max(1, Number(e.parcelas) || 1);
+          const pct = Math.min(100, Math.round((parcPagas / parcTotal) * 100));
           return `
             <div class="glass-card fade-in" style="margin-bottom:12px">
               <div class="flex justify-between items-center" style="margin-bottom:12px">
                 <div>
                   <span style="font-size:1.2rem;font-weight:900">${formatMoney(e.valor)}</span>
-                  <span class="badge badge-${e.status}" style="margin-left:8px">${statusLabel(e.status)}</span>
+                  <span class="badge badge-${cssToken(e.status)}" style="margin-left:8px">${escapeHtml(statusLabel(e.status))}</span>
                 </div>
-                <span style="font-size:0.8rem;color:var(--text-muted)">${e.tipo || 'avulso'}</span>
+                <span style="font-size:0.8rem;color:var(--text-muted)">${escapeHtml(e.tipo || 'avulso')}</span>
               </div>
               <div class="grid-2" style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:12px">
                 <div>Início: <strong>${formatDate(e.data_inicio)}</strong></div>
                 <div>Vencimento: <strong>${formatDate(e.data_vencimento)}</strong></div>
-                <div>Taxa: <strong>${e.taxa || 0}%</strong></div>
+                <div>Taxa: <strong>${Number(e.taxa) || 0}%</strong></div>
                 <div>Parcela: <strong>${formatMoney(e.valor_parcela)}</strong></div>
               </div>
               <div style="margin-bottom:4px;font-size:0.78rem;color:var(--text-muted)">Progresso: ${parcPagas}/${parcTotal} parcelas (${pct}%)</div>
               <div style="height:8px;background:rgba(255,255,255,0.05);border-radius:8px;overflow:hidden">
                 <div style="height:100%;width:${pct}%;background:var(--gradient-brand);border-radius:8px;transition:width 1s"></div>
               </div>
-              ${e.obs ? `<div style="margin-top:8px;font-size:0.8rem;color:var(--text-muted)">Obs: ${e.obs}</div>` : ''}
+              ${e.obs ? `<div style="margin-top:8px;font-size:0.8rem;color:var(--text-muted)">Obs: ${escapeHtml(e.obs)}</div>` : ''}
             </div>
           `;
         }).join('')
@@ -456,8 +473,8 @@ async function renderNotificacoes(container) {
           <div class="glass-card fade-in" style="margin-bottom:8px;${!n.lida ? 'border-left:3px solid var(--brand-emerald)' : ''}">
             <div class="flex justify-between items-center">
               <div>
-                <div style="font-weight:700;font-size:0.95rem">${n.titulo}</div>
-                <div style="font-size:0.85rem;color:var(--text-secondary);margin-top:4px">${n.mensagem}</div>
+                <div style="font-weight:700;font-size:0.95rem">${escapeHtml(n.titulo)}</div>
+                <div style="font-size:0.85rem;color:var(--text-secondary);margin-top:4px">${escapeHtml(n.mensagem)}</div>
               </div>
               <div style="font-size:0.72rem;color:var(--text-muted);white-space:nowrap;margin-left:16px">${formatDateTime(n.created_at)}</div>
             </div>

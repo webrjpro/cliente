@@ -24,13 +24,39 @@ function formatMoney(v) {
 }
 function formatDate(d) {
   if (!d) return '—';
-  return new Date(d).toLocaleDateString('pt-BR');
+  const date = new Date(d);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleDateString('pt-BR');
 }
 function formatDateTime(d) {
   if (!d) return '—';
-  return new Date(d).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+  const date = new Date(d);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
 }
 function statusLabel(s) {
   const map = { pendente:'Pendente', em_analise:'Em Análise', aprovado:'Aprovado', reprovado:'Reprovado', cancelado:'Cancelado', ativo:'Ativo', pago:'Pago' };
   return map[s] || s;
+}
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+function cssToken(value, fallback = 'default') {
+  const token = String(value ?? '').toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  return token || fallback;
+}
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
 }
