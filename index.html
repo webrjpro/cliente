@@ -7,6 +7,12 @@
   <title>CrediGestor — Portal do Cliente</title>
   <link rel="stylesheet" href="css/portal.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💎</text></svg>">
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#10b981">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="CrediGestor">
 </head>
 <body>
   <!-- ═══ Toast Container ═══ -->
@@ -73,9 +79,15 @@
         <a class="nav-item" data-page="contratos" onclick="navigate('contratos')">
           <span>📄</span> Meus Contratos
         </a>
+        <a class="nav-item" data-page="calendario" onclick="navigate('calendario')">
+          <span>📅</span> Calendário
+        </a>
         <a class="nav-item" data-page="notificacoes" onclick="navigate('notificacoes')">
           <span>🔔</span> Notificações
           <span class="nav-badge hidden" id="badge-notif">0</span>
+        </a>
+        <a class="nav-item" data-page="perfil" onclick="navigate('perfil')">
+          <span>👤</span> Meu Perfil
         </a>
       </nav>
       <div style="margin-top:auto;padding:16px;border-top:1px solid var(--border-glass)">
@@ -142,5 +154,13 @@
   <script src="js/config.js"></script>
   <script src="js/auth.js"></script>
   <script src="js/app.js"></script>
+  <!-- PWA: registra service worker (cache offline + installable) -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('service-worker.js').catch(err => console.warn('[PWA] SW falhou:', err));
+      });
+    }
+  </script>
 </body>
 </html>

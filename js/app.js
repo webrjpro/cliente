@@ -12,7 +12,9 @@ const PAGE_RENDERERS = {
   solicitar: () => renderSolicitar,
   pedidos: () => renderPedidos,
   contratos: () => renderContratos,
+  calendario: () => renderCalendario,
   notificacoes: () => renderNotificacoes,
+  perfil: () => renderPerfil,
 };
 
 function renderNavError(container, page, err) {
@@ -142,6 +144,61 @@ function withTimeout(promise, ms = 10000, label = 'query') {
   ]);
 }
 
+// Parseia o JSON `historico_pagamentos` (lista de parcelas) para um array seguro.
+function parseParcelas(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (!raw) return [];
+  try {
+    const v = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(v) ? v : (Array.isArray(v?.parcelas) ? v.parcelas : []);
+  } catch (_) { return []; }
+}
+
+// Retorna a próxima parcela a vencer (status pendente, mais próxima de hoje).
+// Retorna null se não há parcelas pendentes em nenhum empréstimo ativo.
+function getProximoVencimento(emprestimos) {
+  const hoje = new Date(); hoje.setHours(0,0,0,0);
+  let melhor = null;
+  for (const emp of (emprestimos || [])) {
+    if (!emp || emp.status !== 'ativo' || !isPortalVisibleEmprestimo(emp)) continue;
+    const parcelas = parseParcelas(emp.historico_pagamentos);
+    for (const p of parcelas) {
+      const status = String(p?.status || '').toLowerCase();
+      if (status === 'pago') continue;
+      const dt = new Date(p?.dataVencimento || p?.data_vencimento || emp.data_vencimento);
+      if (Number.isNaN(dt.getTime())) continue;
+      const valor = Number(p?.valorBase || p?.valor || emp.valor_parcela) || 0;
+      if (!melhor || dt < melhor.data) {
+        const diasRestantes = Math.round((dt - hoje) / (1000*60*60*24));
+        melhor = { data: dt, valor, status, atrasada: diasRestantes < 0, diasRestantes, contrato: emp };
+      }
+    }
+  }
+  return melhor;
+}
+
+// Push notifications nativas do navegador. Não exige VAPID/backend — usa
+// Notification API + realtime do supabase (só funciona com a aba aberta).
+function pedirPermissaoNotif() {
+  if (!('Notification' in window)) return Promise.resolve('unsupported');
+  if (Notification.permission === 'granted') return Promise.resolve('granted');
+  if (Notification.permission === 'denied') return Promise.resolve('denied');
+  return Notification.requestPermission();
+}
+
+function showNativeNotif(title, body, opts = {}) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    new Notification(title, {
+      body,
+      icon: opts.icon || 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="80">💎</text></svg>',
+      badge: opts.badge,
+      tag: opts.tag || 'credigestor',
+      renotify: true,
+    });
+  } catch (e) { console.warn('[push] notif falhou:', e); }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════
@@ -168,8 +225,10 @@ async function renderDashboard(container) {
   const tiposLimites = getTiposComLimites(clienteData, ativos);
   const limite = tiposLimites.reduce((s, t) => s + t.limite, 0);
   const usado = tiposLimites.reduce((s, t) => s + t.usado, 0);
+  const totalDevido = usado;
   const disponivel = Math.max(0, limite - usado);
   const pendentes = solicitacoes.filter(s => s.status === 'pendente' || s.status === 'em_analise').length;
+  const proximo = getProximoVencimento(emprestimos);
 
   // Update badges
   if (pendentes > 0) {
@@ -181,12 +240,32 @@ async function renderDashboard(container) {
     document.getElementById('badge-notif').classList.remove('hidden');
   }
 
+  // Card de PRÓXIMO VENCIMENTO — destaque grande no topo
+  let proxHTML = '';
+  if (proximo) {
+    const corBg = proximo.atrasada ? 'rgba(239,68,68,0.12)' : (proximo.diasRestantes <= 5 ? 'rgba(245,158,11,0.12)' : 'rgba(16,185,129,0.10)');
+    const corBd = proximo.atrasada ? 'rgba(239,68,68,0.4)' : (proximo.diasRestantes <= 5 ? 'rgba(245,158,11,0.4)' : 'rgba(16,185,129,0.3)');
+    const corTxt = proximo.atrasada ? '#ef4444' : (proximo.diasRestantes <= 5 ? '#f59e0b' : '#10b981');
+    const titulo = proximo.atrasada ? `⚠️ Vencido há ${Math.abs(proximo.diasRestantes)} dia${Math.abs(proximo.diasRestantes)>1?'s':''}` : (proximo.diasRestantes === 0 ? '⏰ Vence HOJE' : `⏳ Vence em ${proximo.diasRestantes} dia${proximo.diasRestantes>1?'s':''}`);
+    proxHTML = `
+      <div class="glass-card" style="background:${corBg};border:1px solid ${corBd};margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+        <div>
+          <div style="font-size:0.75rem;font-weight:700;color:${corTxt};text-transform:uppercase;margin-bottom:4px">${titulo}</div>
+          <div style="font-size:1.4rem;font-weight:900" class="text-money">${formatMoney(proximo.valor)}</div>
+          <div style="font-size:0.8rem;color:var(--text-muted)">Vencimento: ${formatDate(proximo.data)}</div>
+        </div>
+        <button class="btn-ghost" onclick="navigate('contratos')" style="padding:10px 16px">Ver contratos</button>
+      </div>
+    `;
+  }
+
   container.innerHTML = `
     <div class="fade-in">
       <div class="page-header">
         <h1>Olá, ${escapeHtml((clienteData.nome || 'Cliente').split(' ')[0])}! 👋</h1>
         <p>Acompanhe seus créditos e faça novas solicitações</p>
       </div>
+      ${proxHTML}
       <div class="stats-grid">
         <div class="stat-card fade-in stagger-1">
           <div class="stat-label">Limite Total</div>
@@ -355,7 +434,7 @@ async function renderSolicitar(container) {
             </div>
             <div>
               <label class="input-label">Parcelas</label>
-              <select id="sol-parcelas-i" class="input-field">
+              <select id="sol-parcelas-i" class="input-field" onchange="atualizarSimulador()">
                 ${[1,2,3,4,5,6,8,10,12].map(n => `<option value="${n}">${n}x</option>`).join('')}
               </select>
             </div>
@@ -363,7 +442,23 @@ async function renderSolicitar(container) {
 
           <div style="margin-bottom:16px">
             <label class="input-label">Valor desejado (R$) <span id="sol-margem-hint" style="font-weight:400;font-size:0.78rem;color:var(--brand-emerald)">— máx ${formatMoney(tipoDefault.disponivel)}</span></label>
-            <input type="number" id="sol-valor-i" class="input-field" placeholder="0,00" min="1" max="${tipoDefault.disponivel || 999999}" step="0.01" required>
+            <input type="number" id="sol-valor-i" class="input-field" placeholder="0,00" min="1" max="${tipoDefault.disponivel || 999999}" step="0.01" required oninput="atualizarSimulador()">
+          </div>
+
+          <div style="margin-bottom:16px">
+            <label class="input-label">Taxa de juros estimada (% ao mês) <span style="font-weight:400;font-size:0.72rem;color:var(--text-muted)">— pode variar</span></label>
+            <input type="number" id="sol-taxa-i" class="input-field" value="5" min="0" max="50" step="0.1" oninput="atualizarSimulador()">
+          </div>
+
+          <!-- SIMULADOR — recalcula em tempo real -->
+          <div id="sol-simulador" style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.25);border-radius:12px;padding:14px;margin-bottom:20px;display:none">
+            <div style="font-size:0.7rem;font-weight:800;color:#818cf8;text-transform:uppercase;margin-bottom:10px">🧮 Simulação</div>
+            <div class="grid-2" style="font-size:0.88rem;gap:8px">
+              <div>Parcela mensal: <strong id="sim-parcela" class="text-money">—</strong></div>
+              <div>Total a pagar: <strong id="sim-total" class="text-money">—</strong></div>
+              <div>Juros totais: <strong id="sim-juros" style="color:#f59e0b">—</strong></div>
+              <div>CET aprox: <strong id="sim-cet" style="color:var(--text-secondary)">—</strong></div>
+            </div>
           </div>
 
           <div style="margin-bottom:24px">
@@ -396,6 +491,36 @@ function atualizarMargemSolicitar() {
     btn.disabled = t.disponivel <= 0;
     btn.textContent = t.disponivel <= 0 ? 'Sem limite disponível' : 'Enviar Solicitação';
   }
+  atualizarSimulador();
+}
+
+// Recalcula a simulação (parcela, total, juros) — Tabela Price (sistema francês).
+// Mostra apenas se valor>0 e parcelas>0. Cálculo: PMT = PV * (i*(1+i)^n) / ((1+i)^n - 1)
+function atualizarSimulador() {
+  const valor = parseFloat(document.getElementById('sol-valor-i')?.value) || 0;
+  const parcelas = parseInt(document.getElementById('sol-parcelas-i')?.value) || 0;
+  const taxa = parseFloat(document.getElementById('sol-taxa-i')?.value) || 0;
+  const sim = document.getElementById('sol-simulador');
+  if (!sim) return;
+  if (valor <= 0 || parcelas <= 0) { sim.style.display = 'none'; return; }
+  sim.style.display = 'block';
+
+  const i = taxa / 100;
+  let parcelaMensal;
+  if (i === 0) {
+    parcelaMensal = valor / parcelas;
+  } else {
+    parcelaMensal = valor * (i * Math.pow(1+i, parcelas)) / (Math.pow(1+i, parcelas) - 1);
+  }
+  const totalPagar = parcelaMensal * parcelas;
+  const jurosTotais = totalPagar - valor;
+  // CET aproximado anualizado (juros sobre principal × 12 meses)
+  const cet = valor > 0 ? ((Math.pow(1+i, 12) - 1) * 100) : 0;
+
+  document.getElementById('sim-parcela').textContent = formatMoney(parcelaMensal);
+  document.getElementById('sim-total').textContent = formatMoney(totalPagar);
+  document.getElementById('sim-juros').textContent = formatMoney(jurosTotais);
+  document.getElementById('sim-cet').textContent = `${cet.toFixed(2)}% a.a.`;
 }
 
 async function submitSolicitacao(e) {
@@ -511,10 +636,38 @@ async function renderContratos(container) {
       </div>
       ${items.length === 0
         ? '<div class="empty-state"><div class="icon">📑</div><h3>Nenhum contrato</h3><p>Você ainda não possui contratos</p></div>'
-        : items.map(e => {
+        : items.map((e, idx) => {
           const parcPagas = Math.max(0, Number(e.parcelas_pagas) || 0);
           const parcTotal = Math.max(1, Number(e.parcelas) || 1);
           const pct = Math.min(100, Math.round((parcPagas / parcTotal) * 100));
+          const parcelas = parseParcelas(e.historico_pagamentos);
+          const hoje = new Date(); hoje.setHours(0,0,0,0);
+
+          const parcelasHTML = parcelas.length === 0
+            ? `<div style="text-align:center;color:var(--text-muted);padding:16px;font-size:0.85rem">Detalhamento de parcelas indisponível</div>`
+            : `<div class="table-container" style="margin-top:12px">
+                <table class="data-table">
+                  <thead><tr><th>#</th><th>Vencimento</th><th>Valor</th><th>Status</th></tr></thead>
+                  <tbody>${parcelas.map((p, i) => {
+                    const dt = new Date(p?.dataVencimento || p?.data_vencimento || '');
+                    const status = String(p?.status || 'pendente').toLowerCase();
+                    const valor = Number(p?.valorBase || p?.valor) || 0;
+                    let badge = 'pendente';
+                    let label = 'Pendente';
+                    if (status === 'pago') { badge = 'aprovado'; label = 'Pago'; }
+                    else if (!Number.isNaN(dt.getTime()) && dt < hoje) { badge = 'reprovado'; label = 'Atrasada'; }
+                    return `
+                      <tr>
+                        <td>${i+1}</td>
+                        <td>${Number.isNaN(dt.getTime()) ? '—' : formatDate(dt)}</td>
+                        <td class="text-money" style="font-weight:700">${formatMoney(valor)}</td>
+                        <td><span class="badge badge-${badge}"><span class="badge-dot"></span>${label}</span></td>
+                      </tr>
+                    `;
+                  }).join('')}</tbody>
+                </table>
+              </div>`;
+
           return `
             <div class="glass-card fade-in" style="margin-bottom:12px">
               <div class="flex justify-between items-center" style="margin-bottom:12px">
@@ -535,12 +688,248 @@ async function renderContratos(container) {
                 <div style="height:100%;width:${pct}%;background:var(--gradient-brand);border-radius:8px;transition:width 1s"></div>
               </div>
               ${e.obs ? `<div style="margin-top:8px;font-size:0.8rem;color:var(--text-muted)">Obs: ${escapeHtml(e.obs)}</div>` : ''}
+              <details style="margin-top:12px">
+                <summary style="cursor:pointer;font-size:0.85rem;color:var(--brand-emerald);font-weight:700;padding:6px 0">📋 Ver parcelas (${parcelas.length || parcTotal})</summary>
+                ${parcelasHTML}
+              </details>
             </div>
           `;
         }).join('')
       }
     </div>
   `;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CALENDÁRIO DE PAGAMENTOS
+// ═══════════════════════════════════════════════════════════════
+let _calMes = null; // {ano, mes} sendo exibido — null = mês atual
+async function renderCalendario(container) {
+  if (!clienteData) { container.innerHTML = noDataMsg(); return; }
+
+  const { data: emprestimos } = await withTimeout(
+    supabase.from('emprestimos').select('*').eq('cliente_id', clienteData.id).order('created_at', { ascending: false }),
+    10000, 'calendario'
+  );
+  const ativos = (emprestimos || []).filter(isPortalVisibleEmprestimo);
+
+  // Mês a exibir (default = atual)
+  const hoje = new Date();
+  const ref = _calMes ? new Date(_calMes.ano, _calMes.mes, 1) : new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+  const ano = ref.getFullYear();
+  const mes = ref.getMonth();
+
+  // Mapa de pagamentos por dia desse mês: dia → array de {valor, status, contratoId}
+  const eventos = new Map();
+  for (const emp of ativos) {
+    const parcelas = parseParcelas(emp.historico_pagamentos);
+    for (const p of parcelas) {
+      const dt = new Date(p?.dataVencimento || p?.data_vencimento || '');
+      if (Number.isNaN(dt.getTime())) continue;
+      if (dt.getFullYear() !== ano || dt.getMonth() !== mes) continue;
+      const dia = dt.getDate();
+      const valor = Number(p?.valorBase || p?.valor || emp.valor_parcela) || 0;
+      const status = String(p?.status || 'pendente').toLowerCase();
+      if (!eventos.has(dia)) eventos.set(dia, []);
+      eventos.get(dia).push({ valor, status, contratoId: emp.id });
+    }
+  }
+
+  const primeiroDia = new Date(ano, mes, 1).getDay(); // 0=Dom
+  const diasNoMes = new Date(ano, mes + 1, 0).getDate();
+  const nomesMes = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const nomesDiaSemana = ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'];
+
+  // Constrói grid (até 6 semanas × 7 dias)
+  const cells = [];
+  for (let i = 0; i < primeiroDia; i++) cells.push(null); // dias do mês anterior em branco
+  for (let d = 1; d <= diasNoMes; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const isHoje = (dia) => dia === hoje.getDate() && mes === hoje.getMonth() && ano === hoje.getFullYear();
+
+  // Resumo: total pago / pendente / atrasado neste mês
+  let totPago = 0, totPendente = 0, totAtrasado = 0;
+  const hojeReset = new Date(); hojeReset.setHours(0,0,0,0);
+  for (const [dia, evs] of eventos) {
+    const dt = new Date(ano, mes, dia);
+    for (const ev of evs) {
+      if (ev.status === 'pago') totPago += ev.valor;
+      else if (dt < hojeReset) totAtrasado += ev.valor;
+      else totPendente += ev.valor;
+    }
+  }
+
+  container.innerHTML = `
+    <div class="fade-in">
+      <div class="page-header">
+        <h1>📅 Calendário de Pagamentos</h1>
+        <p>Visualize seus vencimentos no mês</p>
+      </div>
+
+      <div class="glass-card" style="margin-bottom:16px">
+        <div class="flex justify-between items-center" style="margin-bottom:16px">
+          <button class="btn-ghost" onclick="navMesCalendario(-1)" style="padding:8px 14px">← Anterior</button>
+          <div style="font-weight:800;font-size:1.1rem">${nomesMes[mes]} ${ano}</div>
+          <button class="btn-ghost" onclick="navMesCalendario(1)" style="padding:8px 14px">Próximo →</button>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:8px">
+          ${nomesDiaSemana.map(n => `<div style="text-align:center;font-size:0.7rem;font-weight:700;color:var(--text-muted);padding:4px">${n}</div>`).join('')}
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">
+          ${cells.map(dia => {
+            if (dia === null) return `<div style="min-height:60px"></div>`;
+            const evs = eventos.get(dia) || [];
+            let cor = 'rgba(255,255,255,0.03)';
+            let textCor = 'var(--text-secondary)';
+            let dot = '';
+            if (evs.length > 0) {
+              const dt = new Date(ano, mes, dia);
+              const temPago = evs.some(e => e.status === 'pago');
+              const temAtrasado = evs.some(e => e.status !== 'pago' && dt < hojeReset);
+              const temPendente = evs.some(e => e.status !== 'pago' && dt >= hojeReset);
+              if (temAtrasado) { cor = 'rgba(239,68,68,0.18)'; textCor = '#fca5a5'; dot = '#ef4444'; }
+              else if (temPendente) { cor = 'rgba(245,158,11,0.18)'; textCor = '#fcd34d'; dot = '#f59e0b'; }
+              else if (temPago) { cor = 'rgba(16,185,129,0.18)'; textCor = '#6ee7b7'; dot = '#10b981'; }
+            }
+            const ringHoje = isHoje(dia) ? 'box-shadow:inset 0 0 0 2px var(--brand-emerald);' : '';
+            const total = evs.reduce((s,e) => s + e.valor, 0);
+            return `
+              <div style="background:${cor};${ringHoje}border-radius:8px;padding:6px 4px;min-height:60px;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;font-size:0.78rem;color:${textCor}">
+                <div style="font-weight:700">${dia}</div>
+                ${dot ? `<div style="width:6px;height:6px;background:${dot};border-radius:50%;margin-top:4px"></div>` : ''}
+                ${evs.length > 0 ? `<div style="font-size:0.62rem;margin-top:2px;text-align:center;line-height:1.1">${formatMoney(total).replace('R$','').trim()}</div>` : ''}
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-bottom:16px">
+        <div class="glass-card" style="background:rgba(16,185,129,0.06)">
+          <div style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;font-weight:700">Pago no mês</div>
+          <div style="font-size:1.3rem;font-weight:900;color:#10b981" class="text-money">${formatMoney(totPago)}</div>
+        </div>
+        <div class="glass-card" style="background:rgba(245,158,11,0.06)">
+          <div style="font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;font-weight:700">A pagar no mês</div>
+          <div style="font-size:1.3rem;font-weight:900;color:#f59e0b" class="text-money">${formatMoney(totPendente)}</div>
+        </div>
+      </div>
+
+      ${totAtrasado > 0 ? `<div class="glass-card" style="background:rgba(239,68,68,0.08);border-color:rgba(239,68,68,0.3)"><div style="font-size:0.7rem;color:#fca5a5;text-transform:uppercase;font-weight:700">⚠️ Atrasado neste mês</div><div style="font-size:1.3rem;font-weight:900;color:#ef4444" class="text-money">${formatMoney(totAtrasado)}</div></div>` : ''}
+
+      <div style="display:flex;gap:8px;justify-content:center;margin-top:16px;font-size:0.75rem;color:var(--text-muted);flex-wrap:wrap">
+        <span>🟢 Pago</span><span>🟡 A vencer</span><span>🔴 Atrasado</span>
+      </div>
+    </div>
+  `;
+}
+
+function navMesCalendario(delta) {
+  const hoje = new Date();
+  const ref = _calMes ? new Date(_calMes.ano, _calMes.mes, 1) : new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+  ref.setMonth(ref.getMonth() + delta);
+  _calMes = { ano: ref.getFullYear(), mes: ref.getMonth() };
+  navigate('calendario');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MEU PERFIL
+// ═══════════════════════════════════════════════════════════════
+async function renderPerfil(container) {
+  if (!clienteData) { container.innerHTML = noDataMsg(); return; }
+
+  const c = clienteData;
+  const notifPerm = ('Notification' in window) ? Notification.permission : 'unsupported';
+  const notifBtn = notifPerm === 'granted'
+    ? `<span style="color:#10b981">✓ Ativadas</span>`
+    : (notifPerm === 'denied'
+        ? `<span style="color:#ef4444">Bloqueadas pelo navegador</span>`
+        : `<button class="btn-brand" onclick="ativarNotifPerfil()" style="padding:8px 16px;font-size:0.85rem">Ativar notificações</button>`);
+
+  container.innerHTML = `
+    <div class="fade-in">
+      <div class="page-header">
+        <h1>👤 Meu Perfil</h1>
+        <p>Seus dados cadastrais e configurações</p>
+      </div>
+
+      <div class="glass-card" style="margin-bottom:16px">
+        <h3 style="font-weight:800;margin-bottom:14px;font-size:1rem">📇 Dados pessoais</h3>
+        <div class="grid-2" style="gap:14px;font-size:0.9rem">
+          <div><div style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;font-weight:700;margin-bottom:2px">Nome</div><div>${escapeHtml(c.nome || '—')}</div></div>
+          <div><div style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;font-weight:700;margin-bottom:2px">Email</div><div>${escapeHtml(currentUser?.email || '—')}</div></div>
+          <div><div style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;font-weight:700;margin-bottom:2px">CPF/CNPJ</div><div>${escapeHtml(c.cpf || '—')}</div></div>
+          <div><div style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;font-weight:700;margin-bottom:2px">Matrícula</div><div>${escapeHtml(c.matricula || '—')}</div></div>
+          <div><div style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;font-weight:700;margin-bottom:2px">Telefone</div><div>${escapeHtml(c.telefone || '—')}</div></div>
+          <div><div style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;font-weight:700;margin-bottom:2px">Renda informada</div><div>${formatMoney(c.renda)}</div></div>
+        </div>
+        <p style="margin-top:14px;font-size:0.75rem;color:var(--text-muted)">💡 Para alterar dados cadastrais, entre em contato com seu gestor.</p>
+      </div>
+
+      <div class="glass-card" style="margin-bottom:16px">
+        <h3 style="font-weight:800;margin-bottom:14px;font-size:1rem">🔐 Trocar senha</h3>
+        <form onsubmit="trocarSenhaPerfil(event)">
+          <div style="margin-bottom:12px">
+            <label class="input-label">Nova senha (mínimo 6 caracteres)</label>
+            <input type="password" id="perfil-nova-senha" class="input-field" minlength="6" required autocomplete="new-password">
+          </div>
+          <div style="margin-bottom:14px">
+            <label class="input-label">Confirme a nova senha</label>
+            <input type="password" id="perfil-nova-senha-2" class="input-field" minlength="6" required autocomplete="new-password">
+          </div>
+          <button type="submit" class="btn-brand" style="padding:10px 20px">Alterar senha</button>
+        </form>
+      </div>
+
+      <div class="glass-card" style="margin-bottom:16px">
+        <h3 style="font-weight:800;margin-bottom:14px;font-size:1rem">🔔 Notificações do navegador</h3>
+        <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:12px">Receba avisos do navegador quando seus pedidos forem atualizados, mesmo com a aba minimizada.</p>
+        <div>${notifBtn}</div>
+      </div>
+
+      <div class="glass-card">
+        <h3 style="font-weight:800;margin-bottom:14px;font-size:1rem">📲 Instalar como aplicativo</h3>
+        <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:8px">No celular ou desktop, abra o menu do navegador e escolha <strong>"Instalar app"</strong> ou <strong>"Adicionar à tela inicial"</strong>. O CrediGestor abrirá em janela própria, como um app nativo.</p>
+      </div>
+
+      <div style="margin-top:20px;text-align:center">
+        <button class="btn-ghost" onclick="handleLogout()" style="padding:10px 24px;color:#ef4444">⏻ Sair da conta</button>
+      </div>
+    </div>
+  `;
+}
+
+async function trocarSenhaPerfil(e) {
+  e.preventDefault();
+  const s1 = document.getElementById('perfil-nova-senha').value;
+  const s2 = document.getElementById('perfil-nova-senha-2').value;
+  if (s1 !== s2) return showToast('As senhas não conferem', 'error');
+  if (s1.length < 6) return showToast('Senha precisa ter pelo menos 6 caracteres', 'error');
+  try {
+    const { error } = await supabase.auth.updateUser({ password: s1 });
+    if (error) throw error;
+    showToast('Senha alterada com sucesso!', 'success');
+    document.getElementById('perfil-nova-senha').value = '';
+    document.getElementById('perfil-nova-senha-2').value = '';
+  } catch (err) {
+    showToast('Erro ao alterar senha: ' + (err.message || 'desconhecido'), 'error');
+  }
+}
+
+async function ativarNotifPerfil() {
+  const r = await pedirPermissaoNotif();
+  if (r === 'granted') {
+    showToast('Notificações ativadas! 🔔', 'success');
+    showNativeNotif('CrediGestor', 'Pronto! Você receberá avisos por aqui.');
+    navigate('perfil');
+  } else if (r === 'denied') {
+    showToast('Notificações bloqueadas. Habilite nas configurações do navegador.', 'error');
+  } else {
+    showToast('Notificações não suportadas neste navegador', 'error');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -604,7 +993,13 @@ function initRealtimeSubscriptions() {
     }, payload => {
       if (payload.eventType === 'UPDATE' && payload.new.status !== payload.old?.status) {
         const s = payload.new;
-        showToast(`Pedido de ${formatMoney(s.valor)} → ${statusLabel(s.status)}`, s.status === 'aprovado' ? 'success' : 'error');
+        const tipo = s.status === 'aprovado' ? 'success' : 'error';
+        showToast(`Pedido de ${formatMoney(s.valor)} → ${statusLabel(s.status)}`, tipo);
+        showNativeNotif(
+          `Pedido ${statusLabel(s.status)}`,
+          `Sua solicitação de ${formatMoney(s.valor)} foi ${statusLabel(s.status).toLowerCase()}.`,
+          { tag: 'pedido-' + s.id }
+        );
         if (currentPage === 'pedidos') navigate('pedidos');
         if (currentPage === 'dashboard') navigate('dashboard');
       }
@@ -629,6 +1024,7 @@ function initRealtimeSubscriptions() {
       filter: `cliente_id=eq.${clienteData.id}`
     }, payload => {
       showToast(`🔔 ${payload.new.titulo}`, 'success');
+      showNativeNotif(payload.new.titulo, payload.new.mensagem || '', { tag: 'notif-' + payload.new.id });
       const badge = document.getElementById('badge-notif');
       badge.classList.remove('hidden');
       badge.textContent = parseInt(badge.textContent || 0) + 1;
