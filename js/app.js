@@ -177,6 +177,45 @@ function getProximoVencimento(emprestimos) {
   return melhor;
 }
 
+// Tema claro/escuro — persistido em localStorage
+function aplicarTema(tema) {
+  const t = tema === 'light' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', t);
+  try { localStorage.setItem('credigestor-theme', t); } catch (_) {}
+  // Atualiza ícone do botão se existir
+  const btn = document.getElementById('btn-toggle-theme');
+  if (btn) btn.textContent = t === 'light' ? '🌙' : '☀️';
+}
+function toggleTema() {
+  const atual = document.documentElement.getAttribute('data-theme') || 'dark';
+  aplicarTema(atual === 'light' ? 'dark' : 'light');
+}
+// Carrega tema salvo na inicialização
+(function loadInitialTheme() {
+  try {
+    const saved = localStorage.getItem('credigestor-theme');
+    if (saved === 'light' || saved === 'dark') aplicarTema(saved);
+  } catch (_) {}
+})();
+
+// Helpers de upload pro bucket "comprovantes" (Supabase Storage).
+// Path: <cliente_id>/<contrato_id>/<parcela_num>-<timestamp>.<ext>
+async function uploadComprovante(clienteId, contratoId, parcelaNumero, file) {
+  if (!file) throw new Error('Nenhum arquivo selecionado');
+  if (file.size > 5 * 1024 * 1024) throw new Error('Arquivo maior que 5 MB');
+  const okMime = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+  if (!okMime.includes(file.type)) throw new Error('Apenas JPG, PNG, WEBP ou PDF');
+  const ext = (file.name.split('.').pop() || 'bin').toLowerCase();
+  const ts = Date.now();
+  const path = `${clienteId}/${contratoId}/p${parcelaNumero}-${ts}.${ext}`;
+  const { data, error } = await supabase.storage.from('comprovantes').upload(path, file, {
+    cacheControl: '3600', upsert: false, contentType: file.type
+  });
+  if (error) throw error;
+  const { data: pub } = supabase.storage.from('comprovantes').getPublicUrl(data.path);
+  return pub.publicUrl;
+}
+
 // Push notifications nativas do navegador. Não exige VAPID/backend — usa
 // Notification API + realtime do supabase (só funciona com a aba aberta).
 function pedirPermissaoNotif() {
@@ -538,9 +577,34 @@ async function submitSolicitacao(e) {
 
   const btn = isInline ? document.getElementById('btn-submit-sol-i') : document.getElementById('btn-submit-sol');
   btn.disabled = true;
-  btn.textContent = 'Enviando...';
+  btn.textContent = 'Validando...';
 
   try {
+    // VALIDAÇÃO 1: limite disponível para o tipo escolhido
+    const { data: ativos } = await withTimeout(
+      supabase.from('emprestimos').select('valor,tipo,aprovacao').eq('cliente_id', clienteData.id).eq('status', 'ativo'),
+      10000, 'validar-limite'
+    );
+    const tipos = getTiposComLimites(clienteData, (ativos || []).filter(isPortalVisibleEmprestimo));
+    const t = tipos.find(x => x.key === tipo);
+    if (!t || t.limite <= 0) {
+      throw new Error(`Você não tem limite configurado para "${smartLabel(tipo)}". Contate seu gestor.`);
+    }
+    if (valor > t.disponivel) {
+      throw new Error(`Valor maior que o disponível (${formatMoney(t.disponivel)}) para ${smartLabel(tipo)}.`);
+    }
+
+    // VALIDAÇÃO 2: já tem solicitação pendente do mesmo tipo
+    const { data: existentes } = await withTimeout(
+      supabase.from('solicitacoes_emprestimo').select('id,valor,tipo,status').eq('cliente_id', clienteData.id).in('status', ['pendente', 'em_analise']),
+      10000, 'validar-dupla'
+    );
+    const dup = (existentes || []).find(s => String(s.tipo).toLowerCase() === String(tipo).toLowerCase());
+    if (dup) {
+      throw new Error(`Você já tem uma solicitação ${smartLabel(tipo)} de ${formatMoney(dup.valor)} aguardando análise. Aguarde a resposta antes de pedir outra.`);
+    }
+
+    btn.textContent = 'Enviando...';
     const { error } = await supabase.from('solicitacoes_emprestimo').insert({
       tenant_id: clienteData.tenant_id,
       cliente_id: clienteData.id,
@@ -647,21 +711,27 @@ async function renderContratos(container) {
             ? `<div style="text-align:center;color:var(--text-muted);padding:16px;font-size:0.85rem">Detalhamento de parcelas indisponível</div>`
             : `<div class="table-container" style="margin-top:12px">
                 <table class="data-table">
-                  <thead><tr><th>#</th><th>Vencimento</th><th>Valor</th><th>Status</th></tr></thead>
+                  <thead><tr><th>#</th><th>Vencimento</th><th>Valor</th><th>Pago em</th><th>Valor pago</th><th>Status</th><th data-no-print>Comprovante</th></tr></thead>
                   <tbody>${parcelas.map((p, i) => {
                     const dt = new Date(p?.dataVencimento || p?.data_vencimento || '');
                     const status = String(p?.status || 'pendente').toLowerCase();
                     const valor = Number(p?.valorBase || p?.valor) || 0;
+                    const dtPago = p?.dataPagamento || p?.data_pagamento;
+                    const valorPago = Number(p?.valorPago || p?.valor_pago) || 0;
                     let badge = 'pendente';
                     let label = 'Pendente';
                     if (status === 'pago') { badge = 'aprovado'; label = 'Pago'; }
                     else if (!Number.isNaN(dt.getTime()) && dt < hoje) { badge = 'reprovado'; label = 'Atrasada'; }
+                    const num = p?.numero ?? (i+1);
                     return `
                       <tr>
-                        <td>${i+1}</td>
+                        <td>${num}</td>
                         <td>${Number.isNaN(dt.getTime()) ? '—' : formatDate(dt)}</td>
                         <td class="text-money" style="font-weight:700">${formatMoney(valor)}</td>
+                        <td>${dtPago ? formatDate(dtPago) : '—'}</td>
+                        <td>${valorPago > 0 ? `<span class="text-money" style="color:#10b981;font-weight:700">${formatMoney(valorPago)}</span>` : '—'}</td>
                         <td><span class="badge badge-${badge}"><span class="badge-dot"></span>${label}</span></td>
+                        <td data-no-print>${status === 'pago' ? '✓' : `<button class="btn-ghost" style="font-size:0.7rem;padding:4px 10px" onclick="abrirUploadComprovante('${escapeHtml(e.id)}', ${num})">📎 Enviar</button>`}</td>
                       </tr>
                     `;
                   }).join('')}</tbody>
@@ -688,10 +758,13 @@ async function renderContratos(container) {
                 <div style="height:100%;width:${pct}%;background:var(--gradient-brand);border-radius:8px;transition:width 1s"></div>
               </div>
               ${e.obs ? `<div style="margin-top:8px;font-size:0.8rem;color:var(--text-muted)">Obs: ${escapeHtml(e.obs)}</div>` : ''}
-              <details style="margin-top:12px">
+              <details style="margin-top:12px" ${idx === 0 ? 'open' : ''}>
                 <summary style="cursor:pointer;font-size:0.85rem;color:var(--brand-emerald);font-weight:700;padding:6px 0">📋 Ver parcelas (${parcelas.length || parcTotal})</summary>
                 ${parcelasHTML}
               </details>
+              <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap" data-no-print>
+                <button class="btn-ghost" style="font-size:0.75rem;padding:6px 12px" onclick="exportarContratoPDF()">🖨️ Salvar PDF / Imprimir</button>
+              </div>
             </div>
           `;
         }).join('')
@@ -885,6 +958,116 @@ async function renderPerfil(container) {
       </div>
     </div>
   `;
+}
+
+// Imprimir/exportar contrato em PDF — usa CSS @media print pra ocultar
+// elementos UI (sidebar, botões) e mostrar só o conteúdo do contrato.
+function exportarContratoPDF() {
+  // Se algum <details> está fechado, abre todos pra incluir parcelas no print
+  document.querySelectorAll('details').forEach(d => d.setAttribute('open', ''));
+  setTimeout(() => window.print(), 100);
+}
+
+// Modal pra cliente fazer upload de comprovante de pagamento de uma parcela.
+// Vai pro Supabase Storage (bucket "comprovantes") e cria notificação ao gestor.
+function abrirUploadComprovante(contratoId, numeroParcela) {
+  let modal = document.getElementById('modal-upload-comprovante');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'modal-upload-comprovante';
+  modal.className = 'modal-overlay open';
+  modal.innerHTML = `
+    <div class="modal-content" style="max-width:480px">
+      <h2 style="font-size:1.1rem;font-weight:800;margin-bottom:16px">📎 Enviar comprovante</h2>
+      <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:16px">Anexe o comprovante de pagamento (PIX, TED, depósito) da <strong>parcela ${numeroParcela}</strong>. O gestor receberá uma notificação para confirmar.</p>
+
+      <div style="margin-bottom:14px">
+        <label class="input-label">Data do pagamento</label>
+        <input type="date" id="comp-data" class="input-field" required value="${new Date().toISOString().split('T')[0]}">
+      </div>
+      <div style="margin-bottom:14px">
+        <label class="input-label">Valor pago (R$)</label>
+        <input type="number" id="comp-valor" class="input-field" step="0.01" min="0.01" placeholder="0,00" required>
+      </div>
+      <div style="margin-bottom:14px">
+        <label class="input-label">Arquivo (JPG/PNG/PDF, até 5 MB)</label>
+        <input type="file" id="comp-file" class="input-field" accept="image/jpeg,image/png,image/webp,application/pdf" required style="padding:8px">
+      </div>
+      <div style="margin-bottom:18px">
+        <label class="input-label">Observação (opcional)</label>
+        <textarea id="comp-obs" class="input-field" rows="2" placeholder="Ex.: PIX da minha conta Itaú"></textarea>
+      </div>
+
+      <div style="display:flex;gap:10px">
+        <button type="button" class="btn-ghost" style="flex:1" onclick="document.getElementById('modal-upload-comprovante').remove()">Cancelar</button>
+        <button type="button" class="btn-brand" style="flex:1" id="btn-comp-enviar" onclick="enviarComprovante('${escapeHtml(contratoId)}', ${numeroParcela})">Enviar</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+}
+
+async function enviarComprovante(contratoId, numeroParcela) {
+  const btn = document.getElementById('btn-comp-enviar');
+  const dataPag = document.getElementById('comp-data').value;
+  const valorPag = parseFloat(document.getElementById('comp-valor').value);
+  const file = document.getElementById('comp-file').files[0];
+  const obs = document.getElementById('comp-obs').value.trim();
+  if (!dataPag || !valorPag || valorPag <= 0 || !file) return showToast('Preencha todos os campos.', 'error');
+
+  btn.disabled = true; btn.textContent = 'Enviando...';
+  try {
+    const url = await uploadComprovante(clienteData.id, contratoId, numeroParcela, file);
+    // Cria notificação pro gestor (que sincroniza pro app via realtime).
+    // Cliente também recebe cópia (aparece em "Notificações").
+    await supabase.from('notificacoes_cliente').insert({
+      tenant_id: clienteData.tenant_id,
+      cliente_id: clienteData.id,
+      tipo: 'comprovante_pagamento',
+      titulo: `📎 Comprovante enviado — Parcela ${numeroParcela}`,
+      mensagem: `Pagamento de ${formatMoney(valorPag)} em ${formatDate(dataPag)}. Aguardando confirmação do gestor.${obs ? ' Obs: ' + obs : ''}`,
+      link_acao: url
+    });
+    showToast('Comprovante enviado! O gestor irá analisar.', 'success');
+    document.getElementById('modal-upload-comprovante').remove();
+  } catch (err) {
+    showToast('Erro ao enviar: ' + (err.message || 'desconhecido'), 'error');
+    btn.disabled = false; btn.textContent = 'Enviar';
+  }
+}
+
+// FAQ embutido — perguntas frequentes (sem chamada externa)
+function abrirFAQ() {
+  let modal = document.getElementById('modal-faq');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'modal-faq';
+  modal.className = 'modal-overlay open';
+  const perguntas = [
+    { q: 'Como solicito um novo crédito?', a: 'Vá em "Solicitar Crédito" no menu lateral. Escolha o tipo, valor e parcelas. O gestor analisará e responderá.' },
+    { q: 'Por que minha solicitação foi reprovada?', a: 'O gestor pode reprovar por análise de crédito ou política interna. Veja o motivo em "Meus Pedidos" → coluna "Decisão".' },
+    { q: 'Como faço para pagar uma parcela?', a: 'O pagamento é feito via PIX/TED para a conta do gestor. Após pagar, vá em "Meus Contratos" → parcela → "📎 Enviar" comprovante.' },
+    { q: 'Quando o limite é atualizado?', a: 'O limite atualiza em tempo real após o gestor aprovar pagamentos ou alterar seu cadastro.' },
+    { q: 'Esqueci minha senha. O que fazer?', a: 'Entre em contato com seu gestor. Ele pode redefinir sua senha em poucos segundos.' },
+    { q: 'Posso instalar como aplicativo?', a: 'Sim! No Chrome/Edge clique em "Instalar app" na barra. No iPhone, use "Adicionar à tela de início" no Safari.' },
+    { q: 'O que são os "tipos extras" (PIS, INSS)?', a: 'Linhas de crédito específicas configuradas pelo gestor, separadas dos limites principais. Cada uma tem sua margem.' },
+    { q: 'Por que não consigo pedir mais crédito?', a: 'Você pode ter atingido o limite ou ter uma solicitação pendente do mesmo tipo. Aguarde a resposta do gestor.' },
+  ];
+  modal.innerHTML = `
+    <div class="modal-content" style="max-width:600px;max-height:80vh;overflow:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="font-size:1.2rem;font-weight:800">❓ Perguntas Frequentes</h2>
+        <button class="btn-ghost" style="padding:6px 12px" onclick="document.getElementById('modal-faq').remove()">✕</button>
+      </div>
+      ${perguntas.map(p => `
+        <details style="margin-bottom:8px;padding:10px;background:var(--bg-glass);border-radius:8px;border:1px solid var(--border-glass)">
+          <summary style="cursor:pointer;font-weight:700;font-size:0.9rem;color:var(--text-primary)">${escapeHtml(p.q)}</summary>
+          <p style="margin-top:10px;font-size:0.85rem;color:var(--text-secondary);line-height:1.6">${escapeHtml(p.a)}</p>
+        </details>
+      `).join('')}
+    </div>
+  `;
+  document.body.appendChild(modal);
 }
 
 async function ativarNotifPerfil() {

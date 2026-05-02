@@ -23,6 +23,36 @@
   --transition: all 0.3s cubic-bezier(.4,0,.2,1);
 }
 
+/* TEMA CLARO — ativado quando <html data-theme="light"> */
+html[data-theme="light"] {
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-card: rgba(255, 255, 255, 0.95);
+  --bg-glass: rgba(15,23,42,0.03);
+  --border-glass: rgba(15,23,42,0.08);
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --gradient-bg: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 50%, #f8fafc 100%);
+  --shadow-glow: 0 4px 20px rgba(16,185,129,0.12);
+}
+
+/* CSS para impressão — usado quando o cliente exporta um contrato em PDF */
+@media print {
+  body { background: #fff !important; color: #000 !important; }
+  .sidebar, .mobile-header, .toast-container, .nav-item, .btn-brand, .btn-ghost,
+  .modal-overlay, [data-no-print], .menu-toggle { display: none !important; }
+  .main-content { padding: 0 !important; max-width: 100% !important; }
+  .glass-card { border: 1px solid #cbd5e1 !important; background: #fff !important;
+    box-shadow: none !important; page-break-inside: avoid; }
+  .data-table { color: #000 !important; }
+  .data-table th { background: #f1f5f9 !important; color: #000 !important; }
+  h1, h2, h3 { color: #000 !important; -webkit-text-fill-color: #000 !important; }
+  .text-money { color: #000 !important; -webkit-text-fill-color: #000 !important; }
+  details { display: block !important; }
+  details summary { display: none; }
+}
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
