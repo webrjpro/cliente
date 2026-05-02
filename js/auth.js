@@ -60,6 +60,7 @@ async function handleLogin(e) {
 }
 
 async function handleLogout() {
+  try { if (typeof logAudit === 'function') await logAudit('logout', 'Cliente saiu da sessão'); } catch (_) {}
   await supabase.auth.signOut();
   currentUser = null;
   clienteData = null;
@@ -102,7 +103,38 @@ async function loadClienteData() {
     return;
   }
 
+  // 4) Bloqueia cliente INATIVO ou em BLACKLIST. Defesa em profundidade:
+  //    a RLS no DB também filtra (se aplicada via migration), mas o
+  //    client-side avisa o usuário e desloga, em vez de só "não ver dados".
+  if (String(data.status || 'ativo').toLowerCase() === 'inativo') {
+    showLogin();
+    const msgEl = document.getElementById('login-error');
+    if (msgEl) {
+      msgEl.textContent = 'Sua conta está INATIVA. Contate seu gestor para reativar.';
+      msgEl.style.display = 'block';
+    }
+    try { await supabase.auth.signOut(); } catch (_) {}
+    currentUser = null; clienteData = null;
+    return;
+  }
+  if (data.blacklist === true || data.blacklist === 1) {
+    showLogin();
+    const msgEl = document.getElementById('login-error');
+    if (msgEl) {
+      msgEl.textContent = 'Acesso bloqueado. Contate seu gestor.';
+      msgEl.style.display = 'block';
+    }
+    try { await supabase.auth.signOut(); } catch (_) {}
+    currentUser = null; clienteData = null;
+    return;
+  }
+
   clienteData = data;
+
+  // Audit log: registra login bem sucedido
+  try {
+    if (typeof logAudit === 'function') logAudit('login_sucesso', `Login do portal — ${currentUser.email}`);
+  } catch (_) {}
 
   // Atualiza última atividade do portal (best-effort, não bloqueia UI)
   try {

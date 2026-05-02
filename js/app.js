@@ -177,6 +177,21 @@ function getProximoVencimento(emprestimos) {
   return melhor;
 }
 
+// Audit log — registra ação do cliente em audit_log_portal.
+// Best-effort: se falhar (RLS/rede), só loga no console e segue.
+async function logAudit(acao, detalhes) {
+  try {
+    if (!clienteData || !acao) return;
+    await supabase.from('audit_log_portal').insert({
+      tenant_id: clienteData.tenant_id,
+      cliente_id: clienteData.id,
+      acao: String(acao).substring(0, 50),
+      detalhes: detalhes ? String(detalhes).substring(0, 500) : null,
+      user_agent: (navigator.userAgent || '').substring(0, 200)
+    });
+  } catch (e) { console.warn('[audit]', e?.message || e); }
+}
+
 // Tema claro/escuro — persistido em localStorage
 function aplicarTema(tema) {
   const t = tema === 'light' ? 'light' : 'dark';
@@ -615,6 +630,7 @@ async function submitSolicitacao(e) {
       status: 'pendente'
     });
     if (error) throw error;
+    logAudit('solicitacao_enviada', `${formatMoney(valor)} ${tipo} ${parcelas}x`);
     showToast('Solicitação enviada com sucesso! Aguarde análise do gestor.');
     closeModal('modal-solicitar');
     navigate('pedidos');
@@ -1028,6 +1044,7 @@ async function enviarComprovante(contratoId, numeroParcela) {
       mensagem: `Pagamento de ${formatMoney(valorPag)} em ${formatDate(dataPag)}. Aguardando confirmação do gestor.${obs ? ' Obs: ' + obs : ''}`,
       link_acao: url
     });
+    logAudit('comprovante_enviado', `Contrato ${contratoId} parcela ${numeroParcela} — ${formatMoney(valorPag)}`);
     showToast('Comprovante enviado! O gestor irá analisar.', 'success');
     document.getElementById('modal-upload-comprovante').remove();
   } catch (err) {
