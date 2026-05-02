@@ -866,22 +866,7 @@ async function renderPerfil(container) {
           <div><div style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;font-weight:700;margin-bottom:2px">Telefone</div><div>${escapeHtml(c.telefone || '—')}</div></div>
           <div><div style="color:var(--text-muted);font-size:0.72rem;text-transform:uppercase;font-weight:700;margin-bottom:2px">Renda informada</div><div>${formatMoney(c.renda)}</div></div>
         </div>
-        <p style="margin-top:14px;font-size:0.75rem;color:var(--text-muted)">💡 Para alterar dados cadastrais, entre em contato com seu gestor.</p>
-      </div>
-
-      <div class="glass-card" style="margin-bottom:16px">
-        <h3 style="font-weight:800;margin-bottom:14px;font-size:1rem">🔐 Trocar senha</h3>
-        <form onsubmit="trocarSenhaPerfil(event)">
-          <div style="margin-bottom:12px">
-            <label class="input-label">Nova senha (mínimo 6 caracteres)</label>
-            <input type="password" id="perfil-nova-senha" class="input-field" minlength="6" required autocomplete="new-password">
-          </div>
-          <div style="margin-bottom:14px">
-            <label class="input-label">Confirme a nova senha</label>
-            <input type="password" id="perfil-nova-senha-2" class="input-field" minlength="6" required autocomplete="new-password">
-          </div>
-          <button type="submit" class="btn-brand" style="padding:10px 20px">Alterar senha</button>
-        </form>
+        <p style="margin-top:14px;font-size:0.75rem;color:var(--text-muted)">💡 Para alterar dados cadastrais ou redefinir sua senha, entre em contato com seu gestor.</p>
       </div>
 
       <div class="glass-card" style="margin-bottom:16px">
@@ -900,23 +885,6 @@ async function renderPerfil(container) {
       </div>
     </div>
   `;
-}
-
-async function trocarSenhaPerfil(e) {
-  e.preventDefault();
-  const s1 = document.getElementById('perfil-nova-senha').value;
-  const s2 = document.getElementById('perfil-nova-senha-2').value;
-  if (s1 !== s2) return showToast('As senhas não conferem', 'error');
-  if (s1.length < 6) return showToast('Senha precisa ter pelo menos 6 caracteres', 'error');
-  try {
-    const { error } = await supabase.auth.updateUser({ password: s1 });
-    if (error) throw error;
-    showToast('Senha alterada com sucesso!', 'success');
-    document.getElementById('perfil-nova-senha').value = '';
-    document.getElementById('perfil-nova-senha-2').value = '';
-  } catch (err) {
-    showToast('Erro ao alterar senha: ' + (err.message || 'desconhecido'), 'error');
-  }
 }
 
 async function ativarNotifPerfil() {
