@@ -89,8 +89,10 @@ function openModal(id) { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
 function isPortalVisibleEmprestimo(emprestimo) {
-  const aprovacao = emprestimo?.aprovacao || 'aprovado';
-  return aprovacao === 'aprovado' || aprovacao === 'arquivado';
+  // Treat missing/empty/null aprovacao as 'aprovado' (default from sync).
+  // Also show 'arquivado' contracts. Only hide explicitly 'pendente' or 'reprovado'.
+  const aprovacao = String(emprestimo?.aprovacao || 'aprovado').toLowerCase().trim();
+  return aprovacao === 'aprovado' || aprovacao === 'arquivado' || aprovacao === '';
 }
 
 function getTipoLimiteCliente(cliData) {
@@ -507,7 +509,7 @@ async function renderSolicitar(container) {
     <div class="fade-in">
       <div class="page-header">
         <h1>💰 Solicitar Crédito</h1>
-        <p>Escolha o tipo de crédito e o valor desejado</p>
+        <p>Preencha os dados abaixo para solicitar um novo empréstimo</p>
       </div>
       <div class="glass-card" style="max-width:640px">
         <div style="background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);border-radius:12px;padding:12px 0;margin-bottom:20px">
@@ -524,9 +526,9 @@ async function renderSolicitar(container) {
               </select>
             </div>
             <div>
-              <label class="input-label">Parcelas</label>
+              <label class="input-label">Parcelas (até 10x)</label>
               <select id="sol-parcelas-i" class="input-field" onchange="atualizarSimulador()">
-                ${[1,2,3,4,5,6,8,10,12].map(n => `<option value="${n}">${n}x</option>`).join('')}
+                ${[1,2,3,4,5,6,7,8,9,10].map(n => `<option value="${n}">${n}x</option>`).join('')}
               </select>
             </div>
           </div>
@@ -537,8 +539,12 @@ async function renderSolicitar(container) {
           </div>
 
           <div style="margin-bottom:16px">
-            <label class="input-label">Taxa de juros estimada (% ao mês) <span style="font-weight:400;font-size:0.72rem;color:var(--text-muted)">— pode variar</span></label>
-            <input type="number" id="sol-taxa-i" class="input-field" value="5" min="0" max="50" step="0.1" oninput="atualizarSimulador()">
+            <label class="input-label">Taxa de juros (% ao mês)</label>
+            <select id="sol-taxa-i" class="input-field" onchange="atualizarSimulador()">
+              <option value="20">20% ao mês</option>
+              <option value="30">30% ao mês</option>
+              <option value="65">65% ao mês</option>
+            </select>
           </div>
 
           <!-- SIMULADOR — recalcula em tempo real -->
@@ -590,7 +596,9 @@ function atualizarMargemSolicitar() {
 function atualizarSimulador() {
   const valor = parseFloat(document.getElementById('sol-valor-i')?.value) || 0;
   const parcelas = parseInt(document.getElementById('sol-parcelas-i')?.value) || 0;
-  const taxa = parseFloat(document.getElementById('sol-taxa-i')?.value) || 0;
+  // Taxa vem do <select> (20, 30 ou 65)
+  const taxaEl = document.getElementById('sol-taxa-i');
+  const taxa = parseFloat(taxaEl?.value || taxaEl?.options?.[taxaEl.selectedIndex]?.value) || 0;
   const sim = document.getElementById('sol-simulador');
   if (!sim) return;
   if (valor <= 0 || parcelas <= 0) { sim.style.display = 'none'; return; }
@@ -1195,6 +1203,27 @@ function refreshCurrentCreditPage(delay = 0) {
   else run();
 }
 
+// Re-fetch clienteData from Supabase to get fresh limits/margins.
+// This ensures margens update after the gestor approves a solicitation.
+async function reloadClienteData() {
+  if (!clienteData) return;
+  try {
+    const { data } = await supabase
+      .from('clientes')
+      .select('*')
+      .eq('id', clienteData.id)
+      .maybeSingle();
+    if (data) {
+      clienteData = data;
+      // Update sidebar name
+      const nameEl = document.getElementById('user-name');
+      if (nameEl) nameEl.textContent = data.nome || 'Cliente';
+    }
+  } catch (err) {
+    console.warn('[portal] Erro ao recarregar dados do cliente:', err.message);
+  }
+}
+
 function initRealtimeSubscriptions() {
   if (realtimeChannel) supabase.removeChannel(realtimeChannel);
   if (!clienteData) return;
@@ -1206,7 +1235,7 @@ function initRealtimeSubscriptions() {
       schema: 'public',
       table: 'solicitacoes_emprestimo',
       filter: `cliente_id=eq.${clienteData.id}`
-    }, payload => {
+    }, async (payload) => {
       if (payload.eventType === 'UPDATE' && payload.new.status !== payload.old?.status) {
         const s = payload.new;
         const tipo = s.status === 'aprovado' ? 'success' : 'error';
@@ -1216,9 +1245,12 @@ function initRealtimeSubscriptions() {
           `Sua solicitação de ${formatMoney(s.valor)} foi ${statusLabel(s.status).toLowerCase()}.`,
           { tag: 'pedido-' + s.id }
         );
+        // Reload client data to get updated limits after approval
+        await reloadClienteData();
         if (currentPage === 'pedidos') navigate('pedidos');
-        if (currentPage === 'dashboard') navigate('dashboard');
-        if (s.status === 'aprovado') refreshCurrentCreditPage(800);
+        else if (currentPage === 'dashboard') navigate('dashboard');
+        // Refresh any credit-related page after a short delay (wait for sync)
+        if (s.status === 'aprovado') refreshCurrentCreditPage(1500);
       }
     })
     .on('postgres_changes', {
@@ -1226,7 +1258,9 @@ function initRealtimeSubscriptions() {
       schema: 'public',
       table: 'emprestimos',
       filter: `cliente_id=eq.${clienteData.id}`
-    }, () => {
+    }, async () => {
+      // When emprestimos change, also reload clienteData so margins are fresh
+      await reloadClienteData();
       refreshCurrentCreditPage();
     })
     .on('postgres_changes', {
@@ -1238,8 +1272,8 @@ function initRealtimeSubscriptions() {
       if (payload.eventType === 'UPDATE') {
         clienteData = { ...clienteData, ...payload.new };
         showToast('Seus limites foram atualizados!', 'success');
-        if (currentPage === 'margens') navigate('margens');
-        if (currentPage === 'dashboard') navigate('dashboard');
+        // Refresh ALL credit-related pages when client data changes
+        refreshCurrentCreditPage();
       }
     })
     .on('postgres_changes', {
