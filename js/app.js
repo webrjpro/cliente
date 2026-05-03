@@ -4,6 +4,7 @@
 
 let currentPage = 'dashboard';
 let realtimeChannel = null;
+const EMPRESTIMO_LIMITE_SELECT = 'valor,tipo,status,aprovacao,taxa,parcelas,parcelas_pagas,valor_parcela,historico_pagamentos';
 
 // ── Navigation ──
 const PAGE_RENDERERS = {
@@ -92,6 +93,42 @@ function isPortalVisibleEmprestimo(emprestimo) {
   return aprovacao === 'aprovado' || aprovacao === 'arquivado';
 }
 
+function getTipoLimiteCliente(cliData) {
+  return String(cliData?.tipo_limite || cliData?.tipoLimite || 'total').toLowerCase();
+}
+
+function getEmprestimoUsoLimite(emprestimo, cliData) {
+  const tipoLimite = getTipoLimiteCliente(cliData);
+  const taxa = Number(emprestimo?.taxa || emprestimo?.taxaJuros) || 0;
+  const divisorPrincipal = 1 + (taxa / 100);
+  const parcelas = parseParcelas(emprestimo?.historico_pagamentos || emprestimo?.historicoPagamentos);
+
+  const aplicarRegra = (valor) => {
+    const num = Number(valor) || 0;
+    if (num <= 0) return 0;
+    return tipoLimite === 'principal' ? num / divisorPrincipal : num;
+  };
+
+  if (parcelas.length > 0) {
+    return parcelas.reduce((sum, p) => {
+      const status = String(p?.status || '').toLowerCase();
+      if (status === 'pago') return sum;
+      const valorParcela = Number(p?.valorBase ?? p?.valor ?? p?.valor_parcela ?? emprestimo?.valor_parcela) || 0;
+      return sum + aplicarRegra(valorParcela);
+    }, 0);
+  }
+
+  const totalParcelas = Math.max(1, Number(emprestimo?.parcelas) || 1);
+  const pagas = Math.max(0, Number(emprestimo?.parcelas_pagas) || 0);
+  const pendentes = Math.max(0, totalParcelas - pagas);
+  const valorParcela = Number(emprestimo?.valor_parcela) || 0;
+  if (valorParcela > 0 && pendentes > 0) {
+    return aplicarRegra(valorParcela) * pendentes;
+  }
+
+  return aplicarRegra(emprestimo?.valor);
+}
+
 // Label inteligente para tipos: 1-4 chars vira UPPERCASE (PIS, INSS, FGTS),
 // demais viram Title Case ("consignado" → "Consignado").
 function smartLabel(key) {
@@ -128,7 +165,7 @@ function getTiposComLimites(cliData, ativos) {
   tipos.forEach(t => {
     t.usado = (ativos || [])
       .filter(e => String(e.tipo || '').toLowerCase() === t.key)
-      .reduce((s, e) => s + (Number(e.valor) || 0), 0);
+      .reduce((s, e) => s + getEmprestimoUsoLimite(e, cliData), 0);
     t.disponivel = Math.max(0, t.limite - t.usado);
   });
 
@@ -388,7 +425,7 @@ async function renderMargens(container) {
   if (!clienteData) { container.innerHTML = noDataMsg(); return; }
 
   const { data: emprestimos } = await withTimeout(
-    supabase.from('emprestimos').select('valor,tipo,status,aprovacao').eq('cliente_id', clienteData.id).eq('status', 'ativo'),
+    supabase.from('emprestimos').select(EMPRESTIMO_LIMITE_SELECT).eq('cliente_id', clienteData.id).eq('status', 'ativo'),
     10000, 'margens'
   );
   const ativos = (emprestimos || []).filter(isPortalVisibleEmprestimo);
@@ -441,7 +478,7 @@ async function renderSolicitar(container) {
   if (!clienteData) { container.innerHTML = noDataMsg(); return; }
 
   const { data: ativos } = await withTimeout(
-    supabase.from('emprestimos').select('valor,tipo,aprovacao').eq('cliente_id', clienteData.id).eq('status', 'ativo'),
+    supabase.from('emprestimos').select(EMPRESTIMO_LIMITE_SELECT).eq('cliente_id', clienteData.id).eq('status', 'ativo'),
     10000, 'solicitar'
   );
   const ativosFiltered = (ativos || []).filter(isPortalVisibleEmprestimo);
@@ -597,7 +634,7 @@ async function submitSolicitacao(e) {
   try {
     // VALIDAÇÃO 1: limite disponível para o tipo escolhido
     const { data: ativos } = await withTimeout(
-      supabase.from('emprestimos').select('valor,tipo,aprovacao').eq('cliente_id', clienteData.id).eq('status', 'ativo'),
+      supabase.from('emprestimos').select(EMPRESTIMO_LIMITE_SELECT).eq('cliente_id', clienteData.id).eq('status', 'ativo'),
       10000, 'validar-limite'
     );
     const tipos = getTiposComLimites(clienteData, (ativos || []).filter(isPortalVisibleEmprestimo));
@@ -1147,6 +1184,17 @@ async function renderNotificacoes(container) {
 // ═══════════════════════════════════════════════════════════════
 // REALTIME SUBSCRIPTIONS
 // ═══════════════════════════════════════════════════════════════
+function refreshCurrentCreditPage(delay = 0) {
+  const pages = ['dashboard', 'margens', 'solicitar', 'contratos', 'calendario'];
+  if (!pages.includes(currentPage)) return;
+  const page = currentPage;
+  const run = () => {
+    if (currentPage === page) navigate(page);
+  };
+  if (delay > 0) setTimeout(run, delay);
+  else run();
+}
+
 function initRealtimeSubscriptions() {
   if (realtimeChannel) supabase.removeChannel(realtimeChannel);
   if (!clienteData) return;
@@ -1170,7 +1218,16 @@ function initRealtimeSubscriptions() {
         );
         if (currentPage === 'pedidos') navigate('pedidos');
         if (currentPage === 'dashboard') navigate('dashboard');
+        if (s.status === 'aprovado') refreshCurrentCreditPage(800);
       }
+    })
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'emprestimos',
+      filter: `cliente_id=eq.${clienteData.id}`
+    }, () => {
+      refreshCurrentCreditPage();
     })
     .on('postgres_changes', {
       event: '*',

@@ -2,7 +2,7 @@
 // Cache-first para arquivos estáticos (HTML/CSS/JS), network-first para Supabase.
 // Bumpe CACHE_VERSION quando publicar mudanças importantes para invalidar cache antigo.
 
-const CACHE_VERSION = 'credigestor-portal-v5';
+const CACHE_VERSION = 'credigestor-portal-v6';
 const STATIC_ASSETS = [
   './',
   './index.html',
