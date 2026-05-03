@@ -594,9 +594,13 @@ function atualizarMargemSolicitar() {
 function atualizarSimulador() {
   const valor = parseFloat(document.getElementById('sol-valor-i')?.value) || 0;
   const parcelas = parseInt(document.getElementById('sol-parcelas-i')?.value) || 0;
-  // Taxa vem do <select> (20, 30 ou 65)
   const taxaEl = document.getElementById('sol-taxa-i');
+  // Se for de 2x até 10x (ou seja, parcelado), aplica automaticamente 65%
+  if (parcelas >= 2 && taxaEl) {
+    taxaEl.value = "65";
+  }
   const taxa = parseFloat(taxaEl?.value || taxaEl?.options?.[taxaEl.selectedIndex]?.value) || 0;
+  
   const sim = document.getElementById('sol-simulador');
   if (!sim) return;
   if (valor <= 0 || parcelas <= 0) { sim.style.display = 'none'; return; }
