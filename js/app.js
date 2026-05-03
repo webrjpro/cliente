@@ -539,11 +539,11 @@ async function renderSolicitar(container) {
           </div>
 
           <div style="margin-bottom:16px">
-            <label class="input-label">Taxa de juros (% ao mês)</label>
+            <label class="input-label">Taxa de juros (Taxa Única)</label>
             <select id="sol-taxa-i" class="input-field" onchange="atualizarSimulador()">
-              <option value="20">20% ao mês</option>
-              <option value="30">30% ao mês</option>
-              <option value="65">65% ao mês</option>
+              <option value="20">20%</option>
+              <option value="30">30%</option>
+              <option value="65">65%</option>
             </select>
           </div>
 
@@ -554,7 +554,6 @@ async function renderSolicitar(container) {
               <div>Parcela mensal: <strong id="sim-parcela" class="text-money">—</strong></div>
               <div>Total a pagar: <strong id="sim-total" class="text-money">—</strong></div>
               <div>Juros totais: <strong id="sim-juros" style="color:#f59e0b">—</strong></div>
-              <div>CET aprox: <strong id="sim-cet" style="color:var(--text-secondary)">—</strong></div>
             </div>
           </div>
 
@@ -591,8 +590,7 @@ function atualizarMargemSolicitar() {
   atualizarSimulador();
 }
 
-// Recalcula a simulação (parcela, total, juros) — Tabela Price (sistema francês).
-// Mostra apenas se valor>0 e parcelas>0. Cálculo: PMT = PV * (i*(1+i)^n) / ((1+i)^n - 1)
+// Recalcula a simulação (parcela, total, juros) — Taxa Única sobre o valor total.
 function atualizarSimulador() {
   const valor = parseFloat(document.getElementById('sol-valor-i')?.value) || 0;
   const parcelas = parseInt(document.getElementById('sol-parcelas-i')?.value) || 0;
@@ -604,22 +602,14 @@ function atualizarSimulador() {
   if (valor <= 0 || parcelas <= 0) { sim.style.display = 'none'; return; }
   sim.style.display = 'block';
 
-  const i = taxa / 100;
-  let parcelaMensal;
-  if (i === 0) {
-    parcelaMensal = valor / parcelas;
-  } else {
-    parcelaMensal = valor * (i * Math.pow(1+i, parcelas)) / (Math.pow(1+i, parcelas) - 1);
-  }
-  const totalPagar = parcelaMensal * parcelas;
+  // Cálculo baseado em Taxa Única (juros incidem uma vez sobre o total solicitado)
+  const totalPagar = valor + (valor * (taxa / 100));
+  const parcelaMensal = totalPagar / parcelas;
   const jurosTotais = totalPagar - valor;
-  // CET aproximado anualizado (juros sobre principal × 12 meses)
-  const cet = valor > 0 ? ((Math.pow(1+i, 12) - 1) * 100) : 0;
 
   document.getElementById('sim-parcela').textContent = formatMoney(parcelaMensal);
   document.getElementById('sim-total').textContent = formatMoney(totalPagar);
   document.getElementById('sim-juros').textContent = formatMoney(jurosTotais);
-  document.getElementById('sim-cet').textContent = `${cet.toFixed(2)}% a.a.`;
 }
 
 async function submitSolicitacao(e) {
