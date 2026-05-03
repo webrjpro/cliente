@@ -501,9 +501,11 @@ async function renderSolicitar(container) {
       </div>
     `;
   }).join('');
-
   // O 1º tipo com disponibilidade > 0 vira default selecionado
   const tipoDefault = tipos.find(t => t.disponivel > 0) || tipos[0] || { key: 'avulso', label: 'Avulso', disponivel: 0 };
+  
+  // Set default timeout to trigger logic
+  setTimeout(atualizarMargemSolicitar, 0);
 
   container.innerHTML = `
     <div class="fade-in">
@@ -577,9 +579,14 @@ function atualizarMargemSolicitar() {
   const inp = document.getElementById('sol-valor-i');
   const hint = document.getElementById('sol-margem-hint');
   const btn = document.getElementById('btn-submit-sol-i');
+  const parcelasEl = document.getElementById('sol-parcelas-i');
+  const taxaEl = document.getElementById('sol-taxa-i');
+
   if (!sel || !inp) return;
   const t = tipos.find(x => x.key === sel.value);
   if (!t) return;
+
+  // Atualiza margem
   inp.max = t.disponivel || 999999;
   if (Number(inp.value) > t.disponivel) inp.value = '';
   if (hint) hint.textContent = `— máx ${formatMoney(t.disponivel)}`;
@@ -587,6 +594,29 @@ function atualizarMargemSolicitar() {
     btn.disabled = t.disponivel <= 0;
     btn.textContent = t.disponivel <= 0 ? 'Sem limite disponível' : 'Enviar Solicitação';
   }
+
+  // Regras de Negócio de Parcelas e Taxas por Tipo
+  if (sel.value === 'avulso' || sel.value === 'pis') {
+    // Avulso e PIS = Apenas 1x
+    parcelasEl.innerHTML = `<option value="1">1x</option>`;
+    parcelasEl.value = "1";
+    
+    if (sel.value === 'avulso') {
+      // Avulso = apenas 20% ou 30%
+      taxaEl.innerHTML = `<option value="20">20%</option><option value="30">30%</option>`;
+    } else {
+      // PIS = 65% manual
+      taxaEl.innerHTML = `<option value="65">65%</option><option value="20">20%</option><option value="30">30%</option>`;
+      taxaEl.value = "65";
+    }
+  } else {
+    // Cartão e Parcelado = 2x a 10x
+    parcelasEl.innerHTML = [2,3,4,5,6,7,8,9,10].map(n => `<option value="${n}">${n}x</option>`).join('');
+    // Taxa travada em 65%
+    taxaEl.innerHTML = `<option value="65">65%</option>`;
+    taxaEl.value = "65";
+  }
+
   atualizarSimulador();
 }
 
@@ -595,10 +625,6 @@ function atualizarSimulador() {
   const valor = parseFloat(document.getElementById('sol-valor-i')?.value) || 0;
   const parcelas = parseInt(document.getElementById('sol-parcelas-i')?.value) || 0;
   const taxaEl = document.getElementById('sol-taxa-i');
-  // Se for de 2x até 10x (ou seja, parcelado), aplica automaticamente 65%
-  if (parcelas >= 2 && taxaEl) {
-    taxaEl.value = "65";
-  }
   const taxa = parseFloat(taxaEl?.value || taxaEl?.options?.[taxaEl.selectedIndex]?.value) || 0;
   
   const sim = document.getElementById('sol-simulador');
